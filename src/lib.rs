@@ -16,6 +16,14 @@
 //!   packet fans out into.
 //! - [`HandoffPacket`] — the committed crossing into TaskAgent.
 //!
+//! # Pipeline seam
+//! [`ActionPacket::from_brief`] packs a finished §15
+//! [`planning_oss::PlanBrief`] into a §13 Action Packet, carrying the
+//! plan's lineage (the source Decision ids land in `linked_decisions`) so
+//! the chain RawItem → SensingItem → Decision → PlanBrief → ActionPacket →
+//! TaskAgent stays auditable. A brief-derived packet is deliberately not
+//! yet mature — Actions fills the execution-only gates before it may cross.
+//!
 //! # Contract
 //! - Actions **never** writes to storage. [`handoff::into_new_plan`]
 //!   lowers a project onto the core [`taskagent_domain::NewPlan`] /
