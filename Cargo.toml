@@ -1,0 +1,24 @@
+[package]
+name = "actions-oss"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.80"
+license = "Apache-2.0 WITH Commons-Clause"
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+# Core domain primitives, consumed read-only via the vendor/oss symlink →
+# sibling taskagent checkout. Mirrors the mcpbox.ru vendoring pattern
+# (see vendor/oss in the intake-oss / planning-oss siblings).
+#
+# Actions is a *domain* layer, not an AI operation: it owns the
+# maturity boundary between deliberation and execution. It therefore
+# depends only on `shared` (ids, errors, time) and `domain` (NewTask,
+# NewPlan, Actor) — never on `ai-infra` (no model calls live here).
+taskagent-shared = { path = "vendor/oss/crates/shared" }
+taskagent-domain = { path = "vendor/oss/crates/domain" }
+
+serde      = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
