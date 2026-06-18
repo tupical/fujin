@@ -2,13 +2,15 @@
 //!
 //! A [`HandoffPacket`] may only be built from a *mature* Action Packet
 //! ([`crate::maturity`]), and each [`HandoffProject`] it carries lowers
-//! onto TaskAgent's real intake contract — [`NewPlan`] + [`NewTask`] from
-//! the `domain` crate. This is where Actions hands off to execution; raw
-//! material never reaches here.
+//! onto TaskAgent's local intake contract — [`NewPlan`] + [`NewTask`] from
+//! the local `agent` module. This is where Actions hands off to execution;
+//! raw material never reaches here.
+//!
+//! mcpbox maps [`NewPlan`] / [`NewTask`] onto the real taskagent types when
+//! dispatching — Actions itself never writes to storage.
 
-use taskagent_domain::{Actor, NewPlan, NewTask};
-use taskagent_shared::{CoreError, ProjectId};
-
+use crate::agent::{Actor, NewPlan, NewTask, ProjectId};
+use crate::error::ActionsError;
 use crate::maturity::assess;
 use crate::packet::{ActionPacket, HandoffPacket, HandoffProject};
 
@@ -21,22 +23,23 @@ use crate::packet::{ActionPacket, HandoffPacket, HandoffProject};
 pub fn to_handoff(
     packet: &ActionPacket,
     projects: Vec<HandoffProject>,
-) -> Result<HandoffPacket, CoreError> {
+) -> Result<HandoffPacket, ActionsError> {
     match assess(packet) {
         m if m.is_ready() => Ok(HandoffPacket { projects }),
-        crate::maturity::Maturity::NotReady { missing } => Err(CoreError::Validation(format!(
-            "action packet is not mature; missing §13 fields: {}",
-            missing.join(", ")
-        ))),
+        crate::maturity::Maturity::NotReady { missing } => {
+            Err(ActionsError::validation(format!(
+                "action packet is not mature; missing §13 fields: {}",
+                missing.join(", ")
+            )))
+        }
         // `is_ready()` already matched the Ready arm above.
         crate::maturity::Maturity::Ready => unreachable!(),
     }
 }
 
-/// Lower one [`HandoffProject`] onto the core intake contract: a
-/// [`NewPlan`] plus the [`NewTask`] rows it owns. The caller dispatches
-/// these against TaskAgent (project create → plan create → add tasks);
-/// Actions never writes to storage itself.
+/// Lower one [`HandoffProject`] onto the local intake contract: a
+/// [`NewPlan`] plus the [`NewTask`] rows it owns. The caller (mcpbox)
+/// dispatches these against TaskAgent; Actions never writes to storage itself.
 pub fn into_new_plan(project: &HandoffProject, project_id: ProjectId, owner: Actor) -> NewPlanWithTasks {
     let mut plan = NewPlan::new(project.plan_title.clone(), project_id, owner);
     plan.goal = Some(project.goal.clone());
@@ -56,7 +59,7 @@ pub fn into_new_plan(project: &HandoffProject, project_id: ProjectId, owner: Act
     NewPlanWithTasks { plan, tasks }
 }
 
-/// A lowered project: the core `NewPlan` and the `NewTask` rows the
+/// A lowered project: the local `NewPlan` and the `NewTask` rows the
 /// caller dispatches against TaskAgent.
 pub struct NewPlanWithTasks {
     pub plan: NewPlan,
@@ -99,7 +102,7 @@ mod tests {
     #[test]
     fn immature_packet_is_refused() {
         let err = to_handoff(&ActionPacket::default(), vec![]).unwrap_err();
-        assert!(matches!(err, CoreError::Validation(_)));
+        assert!(matches!(err, ActionsError::Validation(_)));
     }
 
     #[test]
@@ -109,76 +112,27 @@ mod tests {
         assert!(h.projects.is_empty());
     }
 
-    /// A ready plan brief whose lineage we expect to survive into the
-    /// Action Packet. `decisions_made` carries the `Display` ids of the
-    /// upstream Decisions, exactly as `PlanBrief::from_decisions` writes them.
-    fn ready_brief() -> planning_oss::PlanBrief {
-        planning_oss::PlanBrief {
-            goal: "Ship the Planning→Actions seam".into(),
-            in_scope: vec!["packet.rs::from_brief".into()],
-            completion_criteria: vec!["lineage preserved".into()],
-            taskagent_target: "actions_oss project".into(),
-            why_now: Some("Wave-2 wires the pipeline".into()),
-            out_of_scope: vec!["editing planning_oss".into()],
-            decisions_made: vec!["dec_aaaa".into(), "dec_bbbb".into()],
-            risks: vec!["field drift §13↔§15".into()],
-            constraints: vec!["no ai-infra in Actions".into()],
-            dependencies: vec!["planning-oss PlanBrief".into()],
-            required_artifacts: vec!["manifest §13".into()],
-            knowledge_base: vec!["kn_1".into()],
-            rejected_alternatives: vec!["rej_1".into()],
-            ..planning_oss::PlanBrief::default()
-        }
-    }
-
-    #[test]
-    fn from_brief_preserves_decision_lineage() {
-        // The load-bearing property: the source Decision ids survive into
-        // `linked_decisions`, so the packet can be traced back to the
-        // choices it realises (Decision → PlanBrief → ActionPacket).
-        let packet = ActionPacket::from_brief(&ready_brief());
-
-        let ids: Vec<&str> = packet.linked_decisions.iter().map(|l| l.id.as_str()).collect();
-        assert_eq!(ids, vec!["dec_aaaa", "dec_bbbb"]);
-
-        // The §15 content maps across as expected.
-        assert_eq!(packet.goal, "Ship the Planning→Actions seam");
-        assert_eq!(packet.context, "actions_oss project");
-        assert_eq!(packet.why, "Wave-2 wires the pipeline");
-        assert_eq!(packet.do_items, vec!["packet.rs::from_brief".to_string()]);
-        assert_eq!(packet.constraints, vec!["no ai-infra in Actions".to_string()]);
-        assert_eq!(packet.linked_knowledge[0].id, "kn_1");
-        assert_eq!(packet.linked_rejected[0].id, "rej_1");
-        assert_eq!(packet.required_documents[0].title, "manifest §13");
-    }
-
-    #[test]
-    fn brief_derived_packet_is_immature_until_gates_filled() {
-        // A plan brief states what to do, but not the execution-only §13
-        // gates. So a freshly-converted packet must NOT auto-cross into
-        // TaskAgent — the maturity boundary refuses it.
-        let packet = ActionPacket::from_brief(&ready_brief());
-        let err = to_handoff(&packet, vec![]).unwrap_err();
-        match err {
-            CoreError::Validation(msg) => {
-                // Exactly the three execution-only fields are missing.
-                assert!(msg.contains("expected_artifacts"), "{msg}");
-                assert!(msg.contains("before_start"), "{msg}");
-                assert!(msg.contains("before_complete"), "{msg}");
-            }
-            other => panic!("expected Validation error, got {other:?}"),
-        }
-    }
-
     #[test]
     fn brief_plus_execution_gates_hands_off_to_new_plan() {
-        // Actions completes the brief-derived packet with the execution-only
-        // gates it owns; only then does the full chain reach TaskAgent's
-        // NewPlan/NewTask contract — lineage intact.
-        let mut packet = ActionPacket::from_brief(&ready_brief());
+        // A fully-filled packet hands off and lowers to NewPlan/NewTask.
+        let mut packet = mature_packet();
+        packet.goal = "Ship the Planning→Actions seam".into();
+        packet.context = "actions_oss project".into();
+        packet.why = "Wave-2 wires the pipeline".into();
+        packet.do_items = vec!["packet.rs refactor".into()];
+        packet.constraints = vec!["no ai-infra in Actions".into()];
+        packet.linked_knowledge = vec![LinkedItem { id: "kn_1".into(), label: "kn_1".into() }];
+        packet.linked_rejected = vec![LinkedItem { id: "rej_1".into(), label: "rej_1".into() }];
+        packet.linked_decisions = vec![
+            LinkedItem { id: "dec_aaaa".into(), label: "dec_aaaa".into() },
+            LinkedItem { id: "dec_bbbb".into(), label: "dec_bbbb".into() },
+        ];
         packet.expected_artifacts = vec!["from_brief() + tests".into()];
         packet.before_start = vec![Gate { rule: "brief is ready".into() }];
         packet.before_complete = vec![Gate { rule: "cargo test green".into() }];
+
+        let ids: Vec<&str> = packet.linked_decisions.iter().map(|l| l.id.as_str()).collect();
+        assert_eq!(ids, vec!["dec_aaaa", "dec_bbbb"]);
 
         let project = HandoffProject {
             project_title: "actions_oss".into(),

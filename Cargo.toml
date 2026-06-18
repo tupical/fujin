@@ -9,64 +9,10 @@ license = "Apache-2.0 WITH Commons-Clause"
 path = "src/lib.rs"
 
 [dependencies]
-# Core domain primitives, consumed read-only via the vendor/oss symlink →
-# sibling taskagent checkout. Mirrors the mcpbox.ru vendoring pattern
-# (see vendor/oss in the intake-oss / planning-oss siblings).
-#
-# Actions is a *domain* layer, not an AI operation: it owns the
-# maturity boundary between deliberation and execution. It therefore
-# depends only on `shared` (ids, errors, time) and `domain` (NewTask,
-# NewPlan, Actor) — never on `ai-infra` (no model calls live here).
-taskagent-shared = { path = "vendor/oss/crates/shared" }
-taskagent-domain = { path = "vendor/oss/crates/domain" }
-
-# Planning layer (read-only): Actions packs a finished `PlanBrief` into an
-# Action Packet via `ActionPacket::from_brief`, preserving provenance — the
-# originating Decision ids from `PlanBrief.decisions_made` land in
-# `linked_decisions`, keeping the
-# RawItem→SensingItem→Decision→PlanBrief→ActionPacket→TaskAgent lineage
-# traceable. We consume only the §15 `PlanBrief` data type, never planning's
-# AI-operation surface.
-planning-oss = { path = "../planning_oss" }
-
+# Self-contained skeleton: NO taskagent-* and NO sibling *_oss deps.
+# Every primitive / domain / contract type is local. Cross-layer wiring
+# (e.g. ActionPacket::from_brief(PlanBrief), real taskagent dispatch) is
+# supplied by mcpbox — implementations live only inside mcpbox, never here.
 serde      = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
-
-# Deduplicate vendored crates. `planning-oss` and its transitive deps
-# (decisions_oss → sensemaking_oss → intake_oss) each reach the *same*
-# taskagent OSS tree through their own `vendor/oss` symlink, so Cargo sees
-# the identical crate under many different path strings and refuses the
-# lockfile ("package collision"). Mirror the canonicalisation decisions_oss
-# already does: redirect every sibling vendor path onto this crate's own
-# `vendor/oss/crates/*`. [patch] keys must be URLs, hence `file://`.
-[patch."file:///home/av/projects/planning_oss/vendor/oss/crates/shared"]
-taskagent-shared = { path = "vendor/oss/crates/shared" }
-[patch."file:///home/av/projects/planning_oss/vendor/oss/crates/domain"]
-taskagent-domain = { path = "vendor/oss/crates/domain" }
-[patch."file:///home/av/projects/planning_oss/vendor/oss/crates/ai-infra"]
-taskagent-ai-infra = { path = "vendor/oss/crates/ai-infra" }
-[patch."file:///home/av/projects/planning_oss/vendor/oss/crates/core"]
-taskagent-core = { path = "vendor/oss/crates/core" }
-
-[patch."file:///home/av/projects/decisions_oss/vendor/oss/crates/shared"]
-taskagent-shared = { path = "vendor/oss/crates/shared" }
-[patch."file:///home/av/projects/decisions_oss/vendor/oss/crates/domain"]
-taskagent-domain = { path = "vendor/oss/crates/domain" }
-
-[patch."file:///home/av/projects/sensemaking_oss/vendor/oss/crates/shared"]
-taskagent-shared = { path = "vendor/oss/crates/shared" }
-[patch."file:///home/av/projects/sensemaking_oss/vendor/oss/crates/domain"]
-taskagent-domain = { path = "vendor/oss/crates/domain" }
-[patch."file:///home/av/projects/sensemaking_oss/vendor/oss/crates/ai-infra"]
-taskagent-ai-infra = { path = "vendor/oss/crates/ai-infra" }
-[patch."file:///home/av/projects/sensemaking_oss/vendor/oss/crates/core"]
-taskagent-core = { path = "vendor/oss/crates/core" }
-
-[patch."file:///home/av/projects/intake_oss/vendor/oss/crates/shared"]
-taskagent-shared = { path = "vendor/oss/crates/shared" }
-[patch."file:///home/av/projects/intake_oss/vendor/oss/crates/domain"]
-taskagent-domain = { path = "vendor/oss/crates/domain" }
-[patch."file:///home/av/projects/intake_oss/vendor/oss/crates/ai-infra"]
-taskagent-ai-infra = { path = "vendor/oss/crates/ai-infra" }
-[patch."file:///home/av/projects/intake_oss/vendor/oss/crates/core"]
-taskagent-core = { path = "vendor/oss/crates/core" }
+uuid       = { version = "1.10", features = ["v7", "serde"] }

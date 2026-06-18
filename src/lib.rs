@@ -1,41 +1,32 @@
 //! `actions-oss` — the Actions layer of the MCPBox family: the maturity
 //! boundary between deliberation and execution (manifest §6.5, §13, §16).
 //!
-//! Where `intake-oss` and `planning-oss` are *AI operation* crates built
-//! on `taskagent-ai-infra`, Actions is a pure **domain** layer. It owns
-//! the primitives that decide whether work has ripened to the point of
-//! execution — and only then lets it cross into TaskAgent. Raw material
-//! and un-accepted decisions never reach the execution layer.
-//!
-//! # Primitives (§6.5)
-//! - [`ActionPacket`] — the §13 boundary object, with every required
-//!   field (goal/context/do/why/do-not/criteria/constraints/risks/
-//!   dependencies/required docs/linked decisions+knowledge+rejected/
-//!   expected artifacts/before-start+before-complete gates).
-//! - [`WorkOrder`], [`TaskCandidate`], [`ExecutionStep`] — the units a
-//!   packet fans out into.
-//! - [`HandoffPacket`] — the committed crossing into TaskAgent.
-//!
-//! # Pipeline seam
-//! [`ActionPacket::from_brief`] packs a finished §15
-//! [`planning_oss::PlanBrief`] into a §13 Action Packet, carrying the
-//! plan's lineage (the source Decision ids land in `linked_decisions`) so
-//! the chain RawItem → SensingItem → Decision → PlanBrief → ActionPacket →
-//! TaskAgent stays auditable. A brief-derived packet is deliberately not
-//! yet mature — Actions fills the execution-only gates before it may cross.
+//! A self-contained open-core skeleton: it defines its own primitives,
+//! domain output types, and the local TaskAgent contract types. It has
+//! **no** dependency on taskagent and **no** dependency on sibling `*_oss`
+//! layers. mcpbox supplies concrete taskagent adapters and any cross-layer
+//! wiring — implementations live only inside mcpbox.
 //!
 //! # Contract
 //! - Actions **never** writes to storage. [`handoff::into_new_plan`]
-//!   lowers a project onto the core [`taskagent_domain::NewPlan`] /
-//!   [`taskagent_domain::NewTask`] contract; the caller dispatches it.
+//!   lowers a project onto the local [`agent::NewPlan`] / [`agent::NewTask`]
+//!   contract; mcpbox maps those onto the real taskagent types and dispatches.
 //! - The maturity check ([`maturity::assess`]) is **deterministic**:
 //!   the same packet always yields the same verdict.
-//! - Errors propagate as [`taskagent_shared::CoreError`].
+//! - Errors propagate as [`error::ActionsError`].
+//!
+//! # Note on `ActionPacket::from_brief`
+//! The Planning→Actions adapter (`from_brief(PlanBrief)`) has moved to
+//! mcpbox, which owns cross-layer wiring. It is not part of this skeleton.
 
+pub mod agent;
+pub mod error;
 pub mod handoff;
 pub mod maturity;
 pub mod packet;
 
+pub use agent::{Actor, ActorKind, NewPlan, NewTask, ProjectId};
+pub use error::ActionsError;
 pub use handoff::{into_new_plan, to_handoff, NewPlanWithTasks};
 pub use maturity::{assess, Maturity};
 pub use packet::{
