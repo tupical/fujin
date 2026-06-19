@@ -188,4 +188,77 @@ mod tests {
         let p = full_packet();
         assert_eq!(assess(&p), assess(&p));
     }
+
+    // ── Per-field NotReady tests ──────────────────────────────────────────────
+    //
+    // For each of the 16 §13 required fields: start from a fully-filled packet,
+    // clear exactly one field, and assert that assess() returns NotReady with
+    // exactly that field name in `missing`.
+
+    fn clear_field(field: &str) -> ActionPacket {
+        let mut p = full_packet();
+        match field {
+            "goal" => p.goal = String::new(),
+            "context" => p.context = String::new(),
+            "do_items" => p.do_items.clear(),
+            "why" => p.why = String::new(),
+            "do_not" => p.do_not.clear(),
+            "completion_criteria" => p.completion_criteria.clear(),
+            "constraints" => p.constraints.clear(),
+            "risks" => p.risks.clear(),
+            "dependencies" => p.dependencies.clear(),
+            "required_documents" => p.required_documents.clear(),
+            "linked_decisions" => p.linked_decisions.clear(),
+            "linked_knowledge" => p.linked_knowledge.clear(),
+            "linked_rejected" => p.linked_rejected.clear(),
+            "expected_artifacts" => p.expected_artifacts.clear(),
+            "before_start" => p.before_start.clear(),
+            "before_complete" => p.before_complete.clear(),
+            other => panic!("unknown field: {other}"),
+        }
+        p
+    }
+
+    #[test]
+    fn each_missing_field_produces_not_ready_with_that_field_name() {
+        let fields = [
+            "goal",
+            "context",
+            "do_items",
+            "why",
+            "do_not",
+            "completion_criteria",
+            "constraints",
+            "risks",
+            "dependencies",
+            "required_documents",
+            "linked_decisions",
+            "linked_knowledge",
+            "linked_rejected",
+            "expected_artifacts",
+            "before_start",
+            "before_complete",
+        ];
+
+        for field in fields {
+            let p = clear_field(field);
+            match assess(&p) {
+                Maturity::NotReady { missing } => {
+                    assert!(
+                        missing.contains(&field.to_string()),
+                        "field `{field}` cleared but not listed in missing; got: {missing:?}"
+                    );
+                    // Only this one field should appear as missing.
+                    assert_eq!(
+                        missing.len(),
+                        1,
+                        "expected only `{field}` in missing but got: {missing:?}"
+                    );
+                }
+                Maturity::Ready => {
+                    panic!("clearing `{field}` should yield NotReady but got Ready");
+                }
+            }
+        }
+    }
 }
