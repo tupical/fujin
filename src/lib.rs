@@ -2,15 +2,15 @@
 //! boundary between deliberation and execution (manifest §6.5, §13, §16).
 //!
 //! A self-contained open-core skeleton: it defines its own primitives,
-//! domain output types, and the local TaskAgent contract types. It has
-//! **no** dependency on taskagent and **no** dependency on sibling `*_oss`
-//! layers. mcpbox supplies concrete taskagent adapters and any cross-layer
+//! domain output types, and the local Daruma contract types. It has
+//! **no** dependency on daruma and **no** dependency on sibling `*_oss`
+//! layers. mcpbox supplies concrete daruma adapters and any cross-layer
 //! wiring — implementations live only inside mcpbox.
 //!
 //! # Contract
 //! - Actions **never** writes to storage. [`handoff::into_new_plan`]
 //!   lowers a project onto the local [`agent::NewPlan`] / [`agent::NewTask`]
-//!   contract; mcpbox maps those onto the real taskagent types and dispatches.
+//!   contract; mcpbox maps those onto the real daruma types and dispatches.
 //! - The maturity check ([`maturity::assess`]) is **deterministic**:
 //!   the same packet always yields the same verdict.
 //! - Errors propagate as [`error::ActionsError`].

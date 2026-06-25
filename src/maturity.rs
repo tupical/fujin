@@ -1,7 +1,7 @@
 //! Maturity gate for the §13 Action Packet.
 //!
 //! Manifest §13/§16: only a *mature* Action Packet may cross into
-//! TaskAgent. Maturity here is **deterministic** — every required §13
+//! Daruma. Maturity here is **deterministic** — every required §13
 //! field must be present (non-empty). No model call, no heuristics: the
 //! same packet always yields the same verdict, and a `NotReady` verdict
 //! names exactly which fields are missing so the upper layers know what
@@ -16,7 +16,7 @@ use crate::packet::ActionPacket;
 #[serde(tag = "verdict", rename_all = "snake_case")]
 pub enum Maturity {
     /// Every required §13 field is filled — the packet may spawn work in
-    /// TaskAgent.
+    /// Daruma.
     Ready,
     /// At least one required §13 field is empty. `missing` lists the
     /// field names (in §13 order) that still need filling.
@@ -112,7 +112,7 @@ mod tests {
             goal: "Ship the maturity gate".into(),
             context: "Wave-2b Actions layer".into(),
             do_items: vec!["implement assess()".into()],
-            why: "Only mature packets may reach TaskAgent".into(),
+            why: "Only mature packets may reach Daruma".into(),
             do_not: vec!["do not call any model".into()],
             completion_criteria: vec!["cargo test green".into()],
             constraints: vec!["no ai-infra dependency".into()],

@@ -1,15 +1,15 @@
-//! Local domain primitives for the Actions → TaskAgent contract.
+//! Local domain primitives for the Actions → Daruma contract.
 //!
-//! Replaces `taskagent_domain::{Actor, NewPlan, NewTask}` and
-//! `taskagent_shared::ProjectId` so the crate is dependency-free.
-//! mcpbox maps these onto the real taskagent types when wiring the layer.
+//! Replaces `daruma_domain::{Actor, NewPlan, NewTask}` and
+//! `daruma_shared::ProjectId` so the crate is dependency-free.
+//! mcpbox maps these onto the real daruma types when wiring the layer.
 
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 // ── ProjectId ─────────────────────────────────────────────────────────────────
 
-/// Strongly-typed UUIDv7 identifier for a TaskAgent project.
+/// Strongly-typed UUIDv7 identifier for a Daruma project.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct ProjectId(pub Uuid);
@@ -34,7 +34,7 @@ impl std::fmt::Display for ProjectId {
 
 // ── Actor ─────────────────────────────────────────────────────────────────────
 
-/// The originating agent or user for a TaskAgent operation.
+/// The originating agent or user for a Daruma operation.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct Actor {
     pub kind: ActorKind,
@@ -66,7 +66,7 @@ impl Actor {
 
 // ── NewPlan ───────────────────────────────────────────────────────────────────
 
-/// Input for creating a plan in TaskAgent (mirrors taskagent_domain::NewPlan).
+/// Input for creating a plan in Daruma (mirrors daruma_domain::NewPlan).
 /// mcpbox maps this onto the real `NewPlan` when dispatching.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct NewPlan {
@@ -93,7 +93,7 @@ impl NewPlan {
 
 // ── NewTask ───────────────────────────────────────────────────────────────────
 
-/// Input for creating a task in TaskAgent (mirrors taskagent_domain::NewTask).
+/// Input for creating a task in Daruma (mirrors daruma_domain::NewTask).
 /// mcpbox maps this onto the real `NewTask` when dispatching.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct NewTask {
