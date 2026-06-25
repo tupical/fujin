@@ -1,4 +1,4 @@
-//! `actions-oss` — the Actions layer of the MCPBox family: the maturity
+//! `fujin` — the Actions layer of the MCPBox family: the maturity
 //! boundary between deliberation and execution (manifest §6.5, §13, §16).
 //!
 //! A self-contained open-core skeleton: it defines its own primitives,

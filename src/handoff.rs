@@ -117,7 +117,7 @@ mod tests {
         // A fully-filled packet hands off and lowers to NewPlan/NewTask.
         let mut packet = mature_packet();
         packet.goal = "Ship the Planning→Actions seam".into();
-        packet.context = "actions_oss project".into();
+        packet.context = "fujin project".into();
         packet.why = "Wave-2 wires the pipeline".into();
         packet.do_items = vec!["packet.rs refactor".into()];
         packet.constraints = vec!["no ai-infra in Actions".into()];
@@ -135,7 +135,7 @@ mod tests {
         assert_eq!(ids, vec!["dec_aaaa", "dec_bbbb"]);
 
         let project = HandoffProject {
-            project_title: "actions_oss".into(),
+            project_title: "fujin".into(),
             plan_title: "Wire the seam".into(),
             goal: packet.goal.clone(),
             success_criteria: packet.completion_criteria.clone(),

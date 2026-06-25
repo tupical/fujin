@@ -125,7 +125,7 @@ mod tests {
             linked_decisions: vec![item("dec-1")],
             linked_knowledge: vec![item("kn-1")],
             linked_rejected: vec![item("rej-1")],
-            expected_artifacts: vec!["actions-oss crate".into()],
+            expected_artifacts: vec!["fujin crate".into()],
             before_start: vec![Gate {
                 rule: "charter read".into(),
             }],
