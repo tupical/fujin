@@ -6,7 +6,7 @@
 //! the local `agent` module. This is where Actions hands off to execution;
 //! raw material never reaches here.
 //!
-//! mcpbox maps [`NewPlan`] / [`NewTask`] onto the real daruma types when
+//! the host maps [`NewPlan`] / [`NewTask`] onto the real daruma types when
 //! dispatching — Actions itself never writes to storage.
 
 use crate::agent::{Actor, NewPlan, NewTask, ProjectId};
@@ -38,7 +38,7 @@ pub fn to_handoff(
 }
 
 /// Lower one [`HandoffProject`] onto the local intake contract: a
-/// [`NewPlan`] plus the [`NewTask`] rows it owns. The caller (mcpbox)
+/// [`NewPlan`] plus the [`NewTask`] rows it owns. The caller (the host)
 /// dispatches these against Daruma; Actions never writes to storage itself.
 pub fn into_new_plan(project: &HandoffProject, project_id: ProjectId, owner: Actor) -> NewPlanWithTasks {
     let mut plan = NewPlan::new(project.plan_title.clone(), project_id, owner);
