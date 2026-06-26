@@ -9,7 +9,7 @@
 //! # Note on `from_brief`
 //! The adapter `ActionPacket::from_brief(PlanBrief)` that previously
 //! consumed `planning_oss::PlanBrief` has been removed from this crate.
-//! It moves to mcpbox, which owns the cross-layer wiring and may build an
+//! It moves to the host, which owns the cross-layer wiring and may build an
 //! `ActionPacket` from a `PlanBrief` using the public fields below.
 
 use serde::{Deserialize, Serialize};

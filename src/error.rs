@@ -1,7 +1,7 @@
 //! Local error type.
 //!
 //! Replaces `daruma_shared::CoreError` so the skeleton is
-//! dependency-free. mcpbox maps [`ActionsError`] onto its own error surface
+//! dependency-free. the host maps [`ActionsError`] onto its own error surface
 //! when wiring the layer.
 
 use std::fmt;

@@ -120,7 +120,7 @@ mod tests {
             dependencies: vec!["domain crate".into()],
             required_documents: vec![RequiredDocument {
                 title: "manifest §13".into(),
-                uri: "docs/mcpbox/manifest.md".into(),
+                uri: "docs/the host/manifest.md".into(),
             }],
             linked_decisions: vec![item("dec-1")],
             linked_knowledge: vec![item("kn-1")],

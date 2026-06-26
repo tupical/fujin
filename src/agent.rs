@@ -2,7 +2,7 @@
 //!
 //! Replaces `daruma_domain::{Actor, NewPlan, NewTask}` and
 //! `daruma_shared::ProjectId` so the crate is dependency-free.
-//! mcpbox maps these onto the real daruma types when wiring the layer.
+//! the host maps these onto the real daruma types when wiring the layer.
 
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
@@ -67,7 +67,7 @@ impl Actor {
 // ── NewPlan ───────────────────────────────────────────────────────────────────
 
 /// Input for creating a plan in Daruma (mirrors daruma_domain::NewPlan).
-/// mcpbox maps this onto the real `NewPlan` when dispatching.
+/// the host maps this onto the real `NewPlan` when dispatching.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct NewPlan {
     pub title: String,
@@ -94,7 +94,7 @@ impl NewPlan {
 // ── NewTask ───────────────────────────────────────────────────────────────────
 
 /// Input for creating a task in Daruma (mirrors daruma_domain::NewTask).
-/// mcpbox maps this onto the real `NewTask` when dispatching.
+/// the host maps this onto the real `NewTask` when dispatching.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct NewTask {
     pub title: String,
