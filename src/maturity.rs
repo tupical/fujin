@@ -1,7 +1,7 @@
 //! Maturity gate for the §13 Action Packet.
 //!
 //! Manifest §13/§16: only a *mature* Action Packet may cross into
-//! TaskAgent. Maturity here is **deterministic** — every required §13
+//! Daruma. Maturity here is **deterministic** — every required §13
 //! field must be present (non-empty). No model call, no heuristics: the
 //! same packet always yields the same verdict, and a `NotReady` verdict
 //! names exactly which fields are missing so the upper layers know what
@@ -16,7 +16,7 @@ use crate::packet::ActionPacket;
 #[serde(tag = "verdict", rename_all = "snake_case")]
 pub enum Maturity {
     /// Every required §13 field is filled — the packet may spawn work in
-    /// TaskAgent.
+    /// Daruma.
     Ready,
     /// At least one required §13 field is empty. `missing` lists the
     /// field names (in §13 order) that still need filling.
@@ -112,7 +112,7 @@ mod tests {
             goal: "Ship the maturity gate".into(),
             context: "Wave-2b Actions layer".into(),
             do_items: vec!["implement assess()".into()],
-            why: "Only mature packets may reach TaskAgent".into(),
+            why: "Only mature packets may reach Daruma".into(),
             do_not: vec!["do not call any model".into()],
             completion_criteria: vec!["cargo test green".into()],
             constraints: vec!["no ai-infra dependency".into()],
@@ -125,7 +125,7 @@ mod tests {
             linked_decisions: vec![item("dec-1")],
             linked_knowledge: vec![item("kn-1")],
             linked_rejected: vec![item("rej-1")],
-            expected_artifacts: vec!["actions-oss crate".into()],
+            expected_artifacts: vec!["fujin crate".into()],
             before_start: vec![Gate {
                 rule: "charter read".into(),
             }],
@@ -187,5 +187,78 @@ mod tests {
     fn assessment_is_deterministic() {
         let p = full_packet();
         assert_eq!(assess(&p), assess(&p));
+    }
+
+    // ── Per-field NotReady tests ──────────────────────────────────────────────
+    //
+    // For each of the 16 §13 required fields: start from a fully-filled packet,
+    // clear exactly one field, and assert that assess() returns NotReady with
+    // exactly that field name in `missing`.
+
+    fn clear_field(field: &str) -> ActionPacket {
+        let mut p = full_packet();
+        match field {
+            "goal" => p.goal = String::new(),
+            "context" => p.context = String::new(),
+            "do_items" => p.do_items.clear(),
+            "why" => p.why = String::new(),
+            "do_not" => p.do_not.clear(),
+            "completion_criteria" => p.completion_criteria.clear(),
+            "constraints" => p.constraints.clear(),
+            "risks" => p.risks.clear(),
+            "dependencies" => p.dependencies.clear(),
+            "required_documents" => p.required_documents.clear(),
+            "linked_decisions" => p.linked_decisions.clear(),
+            "linked_knowledge" => p.linked_knowledge.clear(),
+            "linked_rejected" => p.linked_rejected.clear(),
+            "expected_artifacts" => p.expected_artifacts.clear(),
+            "before_start" => p.before_start.clear(),
+            "before_complete" => p.before_complete.clear(),
+            other => panic!("unknown field: {other}"),
+        }
+        p
+    }
+
+    #[test]
+    fn each_missing_field_produces_not_ready_with_that_field_name() {
+        let fields = [
+            "goal",
+            "context",
+            "do_items",
+            "why",
+            "do_not",
+            "completion_criteria",
+            "constraints",
+            "risks",
+            "dependencies",
+            "required_documents",
+            "linked_decisions",
+            "linked_knowledge",
+            "linked_rejected",
+            "expected_artifacts",
+            "before_start",
+            "before_complete",
+        ];
+
+        for field in fields {
+            let p = clear_field(field);
+            match assess(&p) {
+                Maturity::NotReady { missing } => {
+                    assert!(
+                        missing.contains(&field.to_string()),
+                        "field `{field}` cleared but not listed in missing; got: {missing:?}"
+                    );
+                    // Only this one field should appear as missing.
+                    assert_eq!(
+                        missing.len(),
+                        1,
+                        "expected only `{field}` in missing but got: {missing:?}"
+                    );
+                }
+                Maturity::Ready => {
+                    panic!("clearing `{field}` should yield NotReady but got Ready");
+                }
+            }
+        }
     }
 }

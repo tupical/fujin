@@ -1,12 +1,12 @@
-//! The crossing into TaskAgent (manifest §16).
+//! The crossing into Daruma (manifest §16).
 //!
 //! A [`HandoffPacket`] may only be built from a *mature* Action Packet
 //! ([`crate::maturity`]), and each [`HandoffProject`] it carries lowers
-//! onto TaskAgent's local intake contract — [`NewPlan`] + [`NewTask`] from
+//! onto Daruma's local intake contract — [`NewPlan`] + [`NewTask`] from
 //! the local `agent` module. This is where Actions hands off to execution;
 //! raw material never reaches here.
 //!
-//! mcpbox maps [`NewPlan`] / [`NewTask`] onto the real taskagent types when
+//! mcpbox maps [`NewPlan`] / [`NewTask`] onto the real daruma types when
 //! dispatching — Actions itself never writes to storage.
 
 use crate::agent::{Actor, NewPlan, NewTask, ProjectId};
@@ -39,7 +39,7 @@ pub fn to_handoff(
 
 /// Lower one [`HandoffProject`] onto the local intake contract: a
 /// [`NewPlan`] plus the [`NewTask`] rows it owns. The caller (mcpbox)
-/// dispatches these against TaskAgent; Actions never writes to storage itself.
+/// dispatches these against Daruma; Actions never writes to storage itself.
 pub fn into_new_plan(project: &HandoffProject, project_id: ProjectId, owner: Actor) -> NewPlanWithTasks {
     let mut plan = NewPlan::new(project.plan_title.clone(), project_id, owner);
     plan.goal = Some(project.goal.clone());
@@ -60,7 +60,7 @@ pub fn into_new_plan(project: &HandoffProject, project_id: ProjectId, owner: Act
 }
 
 /// A lowered project: the local `NewPlan` and the `NewTask` rows the
-/// caller dispatches against TaskAgent.
+/// caller dispatches against Daruma.
 pub struct NewPlanWithTasks {
     pub plan: NewPlan,
     pub tasks: Vec<NewTask>,
@@ -117,7 +117,7 @@ mod tests {
         // A fully-filled packet hands off and lowers to NewPlan/NewTask.
         let mut packet = mature_packet();
         packet.goal = "Ship the Planning→Actions seam".into();
-        packet.context = "actions_oss project".into();
+        packet.context = "fujin project".into();
         packet.why = "Wave-2 wires the pipeline".into();
         packet.do_items = vec!["packet.rs refactor".into()];
         packet.constraints = vec!["no ai-infra in Actions".into()];
@@ -135,7 +135,7 @@ mod tests {
         assert_eq!(ids, vec!["dec_aaaa", "dec_bbbb"]);
 
         let project = HandoffProject {
-            project_title: "actions_oss".into(),
+            project_title: "fujin".into(),
             plan_title: "Wire the seam".into(),
             goal: packet.goal.clone(),
             success_criteria: packet.completion_criteria.clone(),

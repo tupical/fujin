@@ -3,7 +3,7 @@
 //!
 //! The central object is the [`ActionPacket`]: a packet of work that has
 //! ripened to the point of execution. Only a *mature* Action Packet
-//! (see [`crate::maturity`]) may cross into TaskAgent. Raw material and
+//! (see [`crate::maturity`]) may cross into Daruma. Raw material and
 //! un-accepted decisions never reach the execution layer.
 //!
 //! # Note on `from_brief`
@@ -36,8 +36,8 @@ pub struct LinkedItem {
 
 /// A guard that must hold before a step may start or be considered
 /// complete (§13 "правила перед стартом / перед завершением"; maps onto
-/// TaskAgent's `can_start` / `before_complete`). Free-form text — Actions
-/// states the rule, TaskAgent enforces it.
+/// Daruma's `can_start` / `before_complete`). Free-form text — Actions
+/// states the rule, Daruma enforces it.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Gate {
     pub rule: String,
@@ -48,7 +48,7 @@ pub struct Gate {
 ///
 /// Every field below is part of the §13 contract. Maturity
 /// ([`crate::maturity::assess`]) is what decides whether a packet is
-/// allowed to spawn work in TaskAgent; an under-filled packet is still a
+/// allowed to spawn work in Daruma; an under-filled packet is still a
 /// valid value, just `not_ready`.
 #[derive(Clone, Debug, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct ActionPacket {
@@ -97,7 +97,7 @@ pub struct WorkOrder {
 }
 
 /// A proposed-but-not-yet-committed task (§6.5). Distinct from a
-/// TaskAgent task: it lives in Actions until a [`HandoffPacket`] commits
+/// Daruma task: it lives in Actions until a [`HandoffPacket`] commits
 /// it, so a candidate can still be dropped without polluting execution.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TaskCandidate {
@@ -112,18 +112,18 @@ pub struct ExecutionStep {
     pub action: String,
 }
 
-/// The committed crossing into TaskAgent (§6.5, §16). Produced only from
+/// The committed crossing into Daruma (§6.5, §16). Produced only from
 /// a mature Action Packet; carries the project/plan/task shape the
 /// execution layer will materialize. A packet may yield one, several, or
 /// zero projects (§16) — hence `projects` is a list and may be empty
 /// (the "не породить проект" outcome).
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HandoffPacket {
-    /// Projects to create in TaskAgent (0, 1, or many — §16).
+    /// Projects to create in Daruma (0, 1, or many — §16).
     pub projects: Vec<HandoffProject>,
 }
 
-/// A single project's worth of execution work, shaped to TaskAgent's
+/// A single project's worth of execution work, shaped to Daruma's
 /// `NewPlan` / `NewTask` contract (title + goal + success_criteria; tasks
 /// with title + description).
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
