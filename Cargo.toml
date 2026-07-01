@@ -5,6 +5,9 @@ edition = "2021"
 rust-version = "1.80"
 license = "Apache-2.0 WITH Commons-Clause"
 
+[workspace]
+members = ["server"]
+
 [lib]
 path = "src/lib.rs"
 
