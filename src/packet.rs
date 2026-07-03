@@ -43,6 +43,27 @@ pub struct Gate {
     pub rule: String,
 }
 
+/// Scoped write authority handed to the executor: which paths it owns,
+/// which it may only read, and which are explicitly off-limits. Part of
+/// the bounded execution envelope, not the §13 required contract — an
+/// empty [`TargetFiles`] means the envelope was not set, and unscoped
+/// packets are unaffected.
+#[derive(Clone, Debug, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct TargetFiles {
+    /// Paths the executor owns and may write.
+    pub owned: Vec<String>,
+    /// Paths the executor may read but not write.
+    pub read_only: Vec<String>,
+    /// Paths explicitly out of bounds for this packet.
+    pub forbidden: Vec<String>,
+}
+
+impl TargetFiles {
+    fn is_empty(&self) -> bool {
+        self.owned.is_empty() && self.read_only.is_empty() && self.forbidden.is_empty()
+    }
+}
+
 /// The §13 Action Packet — the boundary object between the thinking
 /// layers and execution.
 ///
@@ -85,6 +106,28 @@ pub struct ActionPacket {
     pub before_start: Vec<Gate>,
     /// правила перед завершением — gates checked before completion.
     pub before_complete: Vec<Gate>,
+
+    // ── Bounded execution envelope ──────────────────────────────────────
+    // Scoping added on top of the §13 contract above. Not required fields:
+    // `maturity::assess` does not check them, and an unset envelope keeps
+    // old JSON payloads and old consumers working unchanged.
+    /// границы правки — which paths the executor owns, may read, or must
+    /// not touch.
+    #[serde(default, skip_serializing_if = "TargetFiles::is_empty")]
+    pub target_files: TargetFiles,
+    /// политика при конфликте — how to resolve a conflicting concurrent
+    /// edit to `target_files.owned`. Free-form text — Actions states the
+    /// policy, the host/Daruma enforces it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub conflict_policy: Option<String>,
+    /// обязательные проверки — checks (tests, lints, gates) that must
+    /// pass before this packet's work counts as complete.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub required_checks: Vec<String>,
+    /// профиль ревьюера — the reviewer profile/persona prescribed for
+    /// this packet's output, if any.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reviewer_profile: Option<String>,
 }
 
 /// A single executable unit carved out of an Action Packet (§6.5). One
@@ -133,4 +176,73 @@ pub struct HandoffProject {
     pub goal: String,
     pub success_criteria: Vec<String>,
     pub tasks: Vec<TaskCandidate>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Pre-envelope JSON (no `target_files`/`conflict_policy`/
+    /// `required_checks`/`reviewer_profile` keys at all) must still
+    /// deserialize, filling the envelope with its empty defaults.
+    #[test]
+    fn old_format_json_deserializes_with_empty_envelope_defaults() {
+        let old_json = r#"{
+            "goal": "g",
+            "context": "c",
+            "do_items": ["d"],
+            "why": "w",
+            "do_not": ["n"],
+            "completion_criteria": ["cc"],
+            "constraints": ["co"],
+            "risks": ["r"],
+            "dependencies": ["dep"],
+            "required_documents": [],
+            "linked_decisions": [],
+            "linked_knowledge": [],
+            "linked_rejected": [],
+            "expected_artifacts": [],
+            "before_start": [],
+            "before_complete": []
+        }"#;
+
+        let packet: ActionPacket = serde_json::from_str(old_json).expect("old-format JSON parses");
+        assert_eq!(packet.target_files, TargetFiles::default());
+        assert_eq!(packet.conflict_policy, None);
+        assert!(packet.required_checks.is_empty());
+        assert_eq!(packet.reviewer_profile, None);
+    }
+
+    /// An envelope-less packet serializes without the new keys at all,
+    /// so old consumers parsing the JSON see exactly the old shape.
+    #[test]
+    fn empty_envelope_is_omitted_from_serialized_json() {
+        let packet = ActionPacket::default();
+        let value = serde_json::to_value(&packet).expect("serializes");
+        let obj = value.as_object().expect("packet serializes to an object");
+        assert!(!obj.contains_key("target_files"));
+        assert!(!obj.contains_key("conflict_policy"));
+        assert!(!obj.contains_key("required_checks"));
+        assert!(!obj.contains_key("reviewer_profile"));
+    }
+
+    /// Round-trip with the envelope fully populated.
+    #[test]
+    fn populated_envelope_round_trips() {
+        let packet = ActionPacket {
+            target_files: TargetFiles {
+                owned: vec!["src/packet.rs".into()],
+                read_only: vec!["src/lib.rs".into()],
+                forbidden: vec!["Cargo.toml".into()],
+            },
+            conflict_policy: Some("last-writer-wins".into()),
+            required_checks: vec!["cargo test".into()],
+            reviewer_profile: Some("rust-reviewer".into()),
+            ..ActionPacket::default()
+        };
+
+        let json = serde_json::to_string(&packet).expect("serializes");
+        let round_tripped: ActionPacket = serde_json::from_str(&json).expect("deserializes");
+        assert_eq!(round_tripped, packet);
+    }
 }

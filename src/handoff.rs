@@ -96,6 +96,7 @@ mod tests {
             expected_artifacts: vec!["a".into()],
             before_start: vec![Gate { rule: "bs".into() }],
             before_complete: vec![Gate { rule: "bc".into() }],
+            ..ActionPacket::default()
         }
     }
 

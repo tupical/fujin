@@ -132,6 +132,7 @@ mod tests {
             before_complete: vec![Gate {
                 rule: "tests pass".into(),
             }],
+            ..ActionPacket::default()
         }
     }
 

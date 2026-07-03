@@ -31,5 +31,5 @@ pub use handoff::{into_new_plan, to_handoff, NewPlanWithTasks};
 pub use maturity::{assess, Maturity};
 pub use packet::{
     ActionPacket, ExecutionStep, Gate, HandoffPacket, HandoffProject, LinkedItem, RequiredDocument,
-    TaskCandidate, WorkOrder,
+    TargetFiles, TaskCandidate, WorkOrder,
 };
