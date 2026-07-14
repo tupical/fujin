@@ -32,12 +32,23 @@ impl Maturity {
 /// Assess an [`ActionPacket`] against the §13 contract.
 ///
 /// A field counts as "present" if it carries content: string fields must
-/// be non-blank (after trimming), list fields must be non-empty. The
-/// checks run in §13 order so `missing` reads as a checklist.
+/// be non-blank (after trimming); list fields must be non-empty *and*
+/// every element in them must itself carry content (no blank strings, no
+/// structs with blank required sub-fields) — a list padded with empty
+/// placeholders is not a filled field. The checks run in §13 order so
+/// `missing` reads as a checklist.
 pub fn assess(packet: &ActionPacket) -> Maturity {
     let mut missing = Vec::new();
 
-    let str_present = |s: &str| !s.trim().is_empty();
+    fn str_present(s: &str) -> bool {
+        !s.trim().is_empty()
+    }
+    fn list_present(items: &[String]) -> bool {
+        !items.is_empty() && items.iter().all(|s| str_present(s))
+    }
+    fn structs_present<T>(items: &[T], all_ok: impl Fn(&T) -> bool) -> bool {
+        !items.is_empty() && items.iter().all(all_ok)
+    }
 
     if !str_present(&packet.goal) {
         missing.push("goal");
@@ -45,46 +56,54 @@ pub fn assess(packet: &ActionPacket) -> Maturity {
     if !str_present(&packet.context) {
         missing.push("context");
     }
-    if packet.do_items.is_empty() {
+    if !list_present(&packet.do_items) {
         missing.push("do_items");
     }
     if !str_present(&packet.why) {
         missing.push("why");
     }
-    if packet.do_not.is_empty() {
+    if !list_present(&packet.do_not) {
         missing.push("do_not");
     }
-    if packet.completion_criteria.is_empty() {
+    if !list_present(&packet.completion_criteria) {
         missing.push("completion_criteria");
     }
-    if packet.constraints.is_empty() {
+    if !list_present(&packet.constraints) {
         missing.push("constraints");
     }
-    if packet.risks.is_empty() {
+    if !list_present(&packet.risks) {
         missing.push("risks");
     }
-    if packet.dependencies.is_empty() {
+    if !list_present(&packet.dependencies) {
         missing.push("dependencies");
     }
-    if packet.required_documents.is_empty() {
+    if !structs_present(&packet.required_documents, |d| {
+        str_present(&d.title) && str_present(&d.uri)
+    }) {
         missing.push("required_documents");
     }
-    if packet.linked_decisions.is_empty() {
+    if !structs_present(&packet.linked_decisions, |i| {
+        str_present(&i.id) && str_present(&i.label)
+    }) {
         missing.push("linked_decisions");
     }
-    if packet.linked_knowledge.is_empty() {
+    if !structs_present(&packet.linked_knowledge, |i| {
+        str_present(&i.id) && str_present(&i.label)
+    }) {
         missing.push("linked_knowledge");
     }
-    if packet.linked_rejected.is_empty() {
+    if !structs_present(&packet.linked_rejected, |i| {
+        str_present(&i.id) && str_present(&i.label)
+    }) {
         missing.push("linked_rejected");
     }
-    if packet.expected_artifacts.is_empty() {
+    if !list_present(&packet.expected_artifacts) {
         missing.push("expected_artifacts");
     }
-    if packet.before_start.is_empty() {
+    if !structs_present(&packet.before_start, |g| str_present(&g.rule)) {
         missing.push("before_start");
     }
-    if packet.before_complete.is_empty() {
+    if !structs_present(&packet.before_complete, |g| str_present(&g.rule)) {
         missing.push("before_complete");
     }
 
@@ -180,6 +199,45 @@ mod tests {
             assess(&p),
             Maturity::NotReady {
                 missing: vec!["goal".to_string()]
+            }
+        );
+    }
+
+    #[test]
+    fn blank_item_in_string_list_is_not_present() {
+        let mut p = full_packet();
+        p.do_items = vec!["   ".into()]; // non-empty Vec, but the one item is blank
+        assert_eq!(
+            assess(&p),
+            Maturity::NotReady {
+                missing: vec!["do_items".to_string()]
+            }
+        );
+    }
+
+    #[test]
+    fn blank_gate_rule_is_not_present() {
+        let mut p = full_packet();
+        p.before_start = vec![Gate { rule: "".into() }];
+        assert_eq!(
+            assess(&p),
+            Maturity::NotReady {
+                missing: vec!["before_start".to_string()]
+            }
+        );
+    }
+
+    #[test]
+    fn blank_required_document_uri_is_not_present() {
+        let mut p = full_packet();
+        p.required_documents = vec![RequiredDocument {
+            title: "manifest §13".into(),
+            uri: "  ".into(),
+        }];
+        assert_eq!(
+            assess(&p),
+            Maturity::NotReady {
+                missing: vec!["required_documents".to_string()]
             }
         );
     }
