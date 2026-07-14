@@ -169,13 +169,25 @@ pub struct HandoffPacket {
 /// A single project's worth of execution work, shaped to Daruma's
 /// `NewPlan` / `NewTask` contract (title + goal + success_criteria; tasks
 /// with title + description).
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct HandoffProject {
     pub project_title: String,
     pub plan_title: String,
     pub goal: String,
     pub success_criteria: Vec<String>,
     pub tasks: Vec<TaskCandidate>,
+    /// Provenance carried over from the Action Packet's §13 `linked_*`
+    /// fields (manifest §6, "родословная задач"), scoped to this project.
+    /// Not part of the maturity contract — the packet is already required
+    /// to be mature before `to_handoff` runs — but dropping it here would
+    /// sever lineage at the actions→execution boundary, which is the whole
+    /// point of carrying it this far.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub linked_decisions: Vec<LinkedItem>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub linked_knowledge: Vec<LinkedItem>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub linked_rejected: Vec<LinkedItem>,
 }
 
 #[cfg(test)]
@@ -244,5 +256,26 @@ mod tests {
         let json = serde_json::to_string(&packet).expect("serializes");
         let round_tripped: ActionPacket = serde_json::from_str(&json).expect("deserializes");
         assert_eq!(round_tripped, packet);
+    }
+
+    /// Pre-lineage JSON (no `linked_decisions`/`linked_knowledge`/
+    /// `linked_rejected` keys) must still deserialize, filling the
+    /// provenance with empty defaults — same back-compat contract as the
+    /// bounded execution envelope above.
+    #[test]
+    fn old_format_handoff_project_json_deserializes_with_empty_links() {
+        let old_json = r#"{
+            "project_title": "Core",
+            "plan_title": "Build it",
+            "goal": "ship",
+            "success_criteria": ["green"],
+            "tasks": []
+        }"#;
+
+        let project: HandoffProject =
+            serde_json::from_str(old_json).expect("old-format JSON parses");
+        assert!(project.linked_decisions.is_empty());
+        assert!(project.linked_knowledge.is_empty());
+        assert!(project.linked_rejected.is_empty());
     }
 }

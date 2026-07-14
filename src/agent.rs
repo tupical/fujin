@@ -7,6 +7,8 @@
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+use crate::packet::LinkedItem;
+
 // ── ProjectId ─────────────────────────────────────────────────────────────────
 
 /// Strongly-typed UUIDv7 identifier for a Daruma project.
@@ -77,6 +79,18 @@ pub struct NewPlan {
     pub goal: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub success_criteria: Option<Vec<String>>,
+    /// Provenance lowered from the Action Packet's §13 `linked_*` fields
+    /// via `HandoffProject` (manifest §6, "родословная задач"). Not part
+    /// of the real `daruma_domain::NewPlan` wire shape yet — the host
+    /// decides how to persist it when dispatching (e.g. folded into
+    /// `description`/`source_brief`); Actions only guarantees these
+    /// references survive the actions→execution lowering step.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub linked_decisions: Vec<LinkedItem>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub linked_knowledge: Vec<LinkedItem>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub linked_rejected: Vec<LinkedItem>,
 }
 
 impl NewPlan {
@@ -87,6 +101,9 @@ impl NewPlan {
             owner,
             goal: None,
             success_criteria: None,
+            linked_decisions: Vec::new(),
+            linked_knowledge: Vec::new(),
+            linked_rejected: Vec::new(),
         }
     }
 }

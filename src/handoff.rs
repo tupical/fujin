@@ -44,6 +44,9 @@ pub fn into_new_plan(project: &HandoffProject, project_id: ProjectId, owner: Act
     let mut plan = NewPlan::new(project.plan_title.clone(), project_id, owner);
     plan.goal = Some(project.goal.clone());
     plan.success_criteria = Some(project.success_criteria.clone());
+    plan.linked_decisions = project.linked_decisions.clone();
+    plan.linked_knowledge = project.linked_knowledge.clone();
+    plan.linked_rejected = project.linked_rejected.clone();
 
     let tasks = project
         .tasks
@@ -144,6 +147,9 @@ mod tests {
                 title: "implement from_brief".into(),
                 description: "map §15 → §13, keep lineage".into(),
             }],
+            linked_decisions: packet.linked_decisions.clone(),
+            linked_knowledge: packet.linked_knowledge.clone(),
+            linked_rejected: packet.linked_rejected.clone(),
         };
         let handoff = to_handoff(&packet, vec![project]).expect("mature packet hands off");
         assert_eq!(handoff.projects.len(), 1);
@@ -152,6 +158,34 @@ mod tests {
         assert_eq!(lowered.plan.goal.as_deref(), Some("Ship the Planning→Actions seam"));
         assert_eq!(lowered.tasks.len(), 1);
         assert_eq!(lowered.tasks[0].title, "implement from_brief");
+        // §13 provenance must survive the actions→execution lowering, not
+        // just the maturity check — this is the lineage the handoff exists
+        // to preserve (manifest §6).
+        assert_eq!(lowered.plan.linked_decisions, packet.linked_decisions);
+        assert_eq!(lowered.plan.linked_knowledge, packet.linked_knowledge);
+        assert_eq!(lowered.plan.linked_rejected, packet.linked_rejected);
+    }
+
+    #[test]
+    fn linked_items_survive_lowering_to_new_plan() {
+        let item = |s: &str| crate::packet::LinkedItem {
+            id: s.into(),
+            label: format!("{s} label"),
+        };
+        let project = HandoffProject {
+            project_title: "Core".into(),
+            plan_title: "Build it".into(),
+            goal: "ship".into(),
+            success_criteria: vec!["green".into()],
+            tasks: vec![],
+            linked_decisions: vec![item("dec_1"), item("dec_2")],
+            linked_knowledge: vec![item("kn_1")],
+            linked_rejected: vec![item("rej_1")],
+        };
+        let lowered = into_new_plan(&project, ProjectId::new(), Actor::user());
+        assert_eq!(lowered.plan.linked_decisions, project.linked_decisions);
+        assert_eq!(lowered.plan.linked_knowledge, project.linked_knowledge);
+        assert_eq!(lowered.plan.linked_rejected, project.linked_rejected);
     }
 
     #[test]
@@ -165,6 +199,7 @@ mod tests {
                 title: "task A".into(),
                 description: "do A".into(),
             }],
+            ..HandoffProject::default()
         };
         let pid = ProjectId::new();
         let lowered = into_new_plan(&project, pid, Actor::user());
