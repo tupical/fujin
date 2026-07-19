@@ -5,33 +5,14 @@
 //! the host maps these onto the real daruma types when wiring the layer.
 
 use serde::{Deserialize, Serialize};
-use uuid::Uuid;
 
 use crate::packet::LinkedItem;
 
 // ── ProjectId ─────────────────────────────────────────────────────────────────
 
-/// Strongly-typed UUIDv7 identifier for a Daruma project.
-#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
-#[serde(transparent)]
-pub struct ProjectId(pub Uuid);
-
-impl ProjectId {
-    pub fn new() -> Self {
-        Self(Uuid::now_v7())
-    }
-}
-
-impl Default for ProjectId {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl std::fmt::Display for ProjectId {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "prj_{}", self.0)
-    }
+layer_kit::newtype_id! {
+    /// Strongly-typed UUIDv7 identifier for a Daruma project.
+    pub struct ProjectId("prj");
 }
 
 // ── Actor ─────────────────────────────────────────────────────────────────────
