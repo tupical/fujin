@@ -31,6 +31,27 @@ impl McpHandler for Handler {
     ) -> Result<serde_json::Value, (StatusCode, serde_json::Value)> {
         dispatch(method, params)
     }
+
+    fn tools(&self) -> Vec<serde_json::Value> {
+        tools()
+    }
+}
+
+/// Tool descriptors for `tools/list` — one per method actually handled by
+/// [`dispatch`] (`fujin.list`/`fujin.get`/`fujin.list_packets`/
+/// `fujin.get_packet` are NOT_IMPLEMENTED, so they are omitted).
+fn tools() -> Vec<serde_json::Value> {
+    vec![json!({
+        "name": "fujin_pack",
+        "description": "Build a typed ActionPacket linked to an upstream Decision.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "source_ref": {"type": "string"}
+            },
+            "required": ["source_ref"]
+        }
+    })]
 }
 
 #[tokio::main]
@@ -116,6 +137,20 @@ mod tests {
         assert_eq!(code, StatusCode::NOT_IMPLEMENTED);
         let (code, _) = dispatch("fujin.nope", json!({})).unwrap_err();
         assert_eq!(code, StatusCode::BAD_REQUEST);
+    }
+
+    #[test]
+    fn tools_list_names_are_all_dispatchable() {
+        for tool in tools() {
+            let name = tool["name"].as_str().unwrap();
+            let method = name.replacen('_', ".", 1);
+            let (_, body) = dispatch(&method, json!({}))
+                .expect_err("empty params must not satisfy any real method");
+            assert_ne!(
+                body["error"], "unknown_method",
+                "{method} must be a real dispatch method"
+            );
+        }
     }
 
     #[test]
