@@ -23,12 +23,20 @@ pub mod agent;
 pub mod error;
 pub mod handoff;
 pub mod maturity;
+pub mod minimality;
 pub mod packet;
 
 pub use agent::{Actor, ActorKind, NewPlan, NewTask, ProjectId};
 pub use error::ActionsError;
 pub use handoff::{into_new_plan, to_handoff, NewPlanWithTasks};
 pub use maturity::{assess, Maturity};
+pub use minimality::{
+    check_minimality, CodeActionMinimality, DebtMarker, DependencyJustification, EvidenceCheck,
+    MinimalityCheck, MinimalityPolicy, MinimalityVerdict, ProtectedRequirements,
+    M2_NO_MINIMALITY_CHECK, M3_NEW_DEP_UNJUSTIFIED, M4_PROTECTED_REQUIREMENT_CUT,
+    M5_NONTRIVIAL_NO_EVIDENCE, M6_DEBT_MARKER_NO_CEILING, W1_DEBT_MARKER_NO_UPGRADE_TRIGGER,
+    W2_NEED_NOT_ESTABLISHED,
+};
 pub use packet::{
     ActionPacket, ExecutionStep, Gate, HandoffPacket, HandoffProject, LinkedItem, RequiredDocument,
     TargetFiles, TaskCandidate, WorkOrder,
