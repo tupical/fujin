@@ -20,13 +20,16 @@
 //! the host, which owns cross-layer wiring. It is not part of this skeleton.
 
 pub mod agent;
+pub mod ai;
 pub mod error;
 pub mod handoff;
 pub mod maturity;
 pub mod minimality;
+pub mod pack;
 pub mod packet;
 
 pub use agent::{Actor, ActorKind, NewPlan, NewTask, ProjectId};
+pub use ai::{AiError, AiOutput, AiProvider, AiRequest, ToolCall};
 pub use error::ActionsError;
 pub use handoff::{into_new_plan, to_handoff, NewPlanWithTasks};
 pub use maturity::{assess, Maturity};
@@ -37,6 +40,7 @@ pub use minimality::{
     M5_NONTRIVIAL_NO_EVIDENCE, M6_DEBT_MARKER_NO_CEILING, W1_DEBT_MARKER_NO_UPGRADE_TRIGGER,
     W2_NEED_NOT_ESTABLISHED,
 };
+pub use pack::pack_ai;
 pub use packet::{
     ActionPacket, ExecutionStep, Gate, HandoffPacket, HandoffProject, LinkedItem, RequiredDocument,
     TargetFiles, TaskCandidate, WorkOrder,

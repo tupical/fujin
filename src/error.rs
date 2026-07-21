@@ -6,6 +6,13 @@
 //! `layer_error!` macro instead of hand-copied per layer.
 
 layer_kit::layer_error!(ActionsError {
+    Ai(ai, "AI provider failed or returned an unusable response."),
     Validation(validation, "Output failed validation (missing or invalid fields)."),
     Serde(serde, "(De)serialization failure."),
 });
+
+impl From<crate::ai::AiError> for ActionsError {
+    fn from(value: crate::ai::AiError) -> Self {
+        Self::ai(value.to_string())
+    }
+}
