@@ -1,6 +1,6 @@
 use serde_json::{json, Value};
 
-use crate::{ActionPacket, ActionsError, AiOutput, AiProvider, AiRequest, LinkedItem};
+use crate::{ActionPacket, ActionsError, AiOutput, AiProvider, AiRequest, AiUsage, LinkedItem};
 
 fn string_array() -> Value {
     json!({"type": "array", "items": {"type": "string"}})
@@ -11,7 +11,7 @@ pub async fn pack_ai<P: AiProvider>(
     provider: &P,
     context: &Value,
     source_ref: &str,
-) -> Result<ActionPacket, ActionsError> {
+) -> Result<(ActionPacket, Option<AiUsage>), ActionsError> {
     let linked_items = json!({
         "type": "array",
         "items": {
@@ -62,9 +62,8 @@ pub async fn pack_ai<P: AiProvider>(
         })],
         tool_choice: Some("required".into()),
     };
-    let call = provider
-        .respond(req)
-        .await?
+    let (outputs, usage) = provider.respond_with_usage(req).await?;
+    let call = outputs
         .into_iter()
         .find_map(|output| match output {
             AiOutput::ToolCall(call) if call.name == "build_action_packet" => Some(call),
@@ -77,5 +76,5 @@ pub async fn pack_ai<P: AiProvider>(
         id: source_ref.to_owned(),
         label: source_ref.to_owned(),
     }];
-    Ok(packet)
+    Ok((packet, usage))
 }

@@ -37,9 +37,16 @@ impl McpHandler for Handler {
     ) -> Result<serde_json::Value, (StatusCode, serde_json::Value)> {
         if let Some(cfg) = extract_ai_config(&mut params) {
             let provider = OpenAiProvider::new(cfg);
-            dispatch(&self.store, Some(&provider), true, method, params).await
+            dispatch(
+                &self.store,
+                Some(&provider),
+                Some(provider.model()),
+                method,
+                params,
+            )
+            .await
         } else {
-            dispatch(&self.store, self.ai.as_ref(), false, method, params).await
+            dispatch(&self.store, self.ai.as_ref(), None, method, params).await
         }
     }
 
@@ -145,7 +152,7 @@ fn storage_error(e: impl std::fmt::Display) -> (StatusCode, serde_json::Value) {
 async fn dispatch<P: fujin::AiProvider>(
     store: &Store,
     ai: Option<&P>,
-    request_ai: bool,
+    model: Option<&str>,
     method: &str,
     params: serde_json::Value,
 ) -> Result<serde_json::Value, (StatusCode, serde_json::Value)> {
@@ -158,14 +165,14 @@ async fn dispatch<P: fujin::AiProvider>(
                     json!({"error": "invalid_params", "detail": e.to_string()}),
                 )
             })?;
-            if request_ai {
+            if let Some(model) = model {
                 let provider = ai.ok_or_else(|| {
                     (
                         StatusCode::SERVICE_UNAVAILABLE,
                         json!({"error": "ai_not_configured", "detail": "AI provider is not configured"}),
                     )
                 })?;
-                let packet = fujin::pack_ai(provider, &context, &p.source_ref)
+                let (packet, usage) = fujin::pack_ai(provider, &context, &p.source_ref)
                     .await
                     .map_err(|e| {
                         (
@@ -183,7 +190,11 @@ async fn dispatch<P: fujin::AiProvider>(
                     .put("action_packet", &p.source_ref, &packet)
                     .await
                     .map_err(storage_error)?;
-                return Ok(json!({ "method": "fujin.pack", "action_packet": packet }));
+                let mut meta = json!({"model": model});
+                if let Some(usage) = usage {
+                    meta["usage"] = json!(usage);
+                }
+                return Ok(json!({ "method": "fujin.pack", "action_packet": packet, "_meta": meta }));
             }
             let packet = if let Some(brief) = p.plan_brief {
                 fujin::packet_from_brief(&brief)
@@ -246,7 +257,7 @@ async fn dispatch<P: fujin::AiProvider>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use fujin::{AiError, AiOutput, AiRequest, ToolCall};
+    use fujin::{AiError, AiOutput, AiRequest, AiUsage, ToolCall};
     use std::sync::atomic::{AtomicU64, Ordering};
 
     static DB_SEQ: AtomicU64 = AtomicU64::new(1);
@@ -272,7 +283,14 @@ mod tests {
         method: &str,
         params: serde_json::Value,
     ) -> Result<serde_json::Value, (StatusCode, serde_json::Value)> {
-        super::dispatch(&test_store().await, ai, request_ai, method, params).await
+        super::dispatch(
+            &test_store().await,
+            ai,
+            request_ai.then_some("test"),
+            method,
+            params,
+        )
+        .await
     }
 
     struct Fake(Result<Vec<AiOutput>, AiError>);
@@ -280,6 +298,17 @@ mod tests {
     impl fujin::AiProvider for Fake {
         async fn respond(&self, _req: AiRequest) -> Result<Vec<AiOutput>, AiError> {
             self.0.clone()
+        }
+
+        async fn respond_with_usage(
+            &self,
+            _req: AiRequest,
+        ) -> Result<(Vec<AiOutput>, Option<AiUsage>), AiError> {
+            Ok((self.0.clone()?, Some(AiUsage {
+                input_tokens: Some(123),
+                output_tokens: Some(45),
+                total_tokens: Some(168),
+            })))
         }
     }
 
@@ -319,6 +348,7 @@ mod tests {
         let packet = &out["action_packet"];
         assert_eq!(out["method"], "fujin.pack");
         assert_eq!(packet["linked_decisions"][0]["id"], "dec_abc");
+        assert!(out.get("_meta").is_none());
     }
 
     #[tokio::test]
@@ -340,7 +370,7 @@ mod tests {
         let created = super::dispatch(
             &store,
             None::<&OpenAiProvider>,
-            false,
+            None,
             "fujin.pack",
             json!({
                 "source_ref": "decision_1",
@@ -365,7 +395,7 @@ mod tests {
         let got = super::dispatch(
             &reopened,
             None::<&OpenAiProvider>,
-            false,
+            None,
             "fujin.get_packet",
             json!({"id": "decision_1"}),
         )
@@ -377,7 +407,7 @@ mod tests {
         let (code, body) = super::dispatch(
             &reopened,
             None::<&OpenAiProvider>,
-            false,
+            None,
             "fujin.pack",
             json!({"source_ref": "decision_2"}),
         )
@@ -420,11 +450,20 @@ mod tests {
             "ai": {"api_key": "sk-secret", "base_url": "https://ai.test/v1", "model": "test"}
         });
         assert!(extract_ai_config(&mut params).is_some());
-        let out = dispatch(Some(&fake), true, "fujin.pack", params)
+        let store = test_store().await;
+        let out = super::dispatch(&store, Some(&fake), Some("test"), "fujin.pack", params)
             .await
             .unwrap();
         assert_eq!(out["action_packet"]["goal"], "Ship auth");
         assert_eq!(out["action_packet"]["linked_decisions"][0]["id"], "dec_abc");
+        assert_eq!(out["_meta"]["model"], "test");
+        assert_eq!(out["_meta"]["usage"]["total_tokens"], 168);
+        let stored: serde_json::Value = store
+            .get("action_packet", "dec_abc")
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(stored.get("_meta").is_none());
         assert!(!out.to_string().contains("sk-secret"));
     }
 

@@ -24,7 +24,7 @@ pub mod pack;
 pub mod packet;
 
 pub use agent::{Actor, ActorKind, NewPlan, NewTask, ProjectId};
-pub use ai::{AiError, AiOutput, AiProvider, AiRequest, ToolCall};
+pub use ai::{AiError, AiOutput, AiProvider, AiRequest, AiUsage, ToolCall};
 pub use error::ActionsError;
 pub use handoff::{into_new_plan, to_handoff, NewPlanWithTasks};
 pub use maturity::{assess, Maturity};
