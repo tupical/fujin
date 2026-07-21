@@ -17,6 +17,7 @@ use layer_kit::ai::extract_ai_config;
 use layer_kit::auth::Claims;
 use layer_kit::openai::{AiConfig, OpenAiProvider};
 use layer_kit::serve::{serve, McpHandler, ServeConfig};
+use layer_kit::store::Store;
 use serde_json::json;
 
 const TOOL: &str = "fujin";
@@ -24,6 +25,7 @@ const TOOL: &str = "fujin";
 /// Dispatches fujin's MCP methods and owns the optional env fallback provider.
 struct Handler {
     ai: Option<OpenAiProvider>,
+    store: Store,
 }
 
 impl McpHandler for Handler {
@@ -35,9 +37,9 @@ impl McpHandler for Handler {
     ) -> Result<serde_json::Value, (StatusCode, serde_json::Value)> {
         if let Some(cfg) = extract_ai_config(&mut params) {
             let provider = OpenAiProvider::new(cfg);
-            dispatch(Some(&provider), true, method, params).await
+            dispatch(&self.store, Some(&provider), true, method, params).await
         } else {
-            dispatch(self.ai.as_ref(), false, method, params).await
+            dispatch(&self.store, self.ai.as_ref(), false, method, params).await
         }
     }
 
@@ -47,25 +49,50 @@ impl McpHandler for Handler {
 }
 
 /// Tool descriptors for `tools/list` — one per method actually handled by
-/// [`dispatch`] (`fujin.list`/`fujin.get`/`fujin.list_packets`/
-/// `fujin.get_packet` are NOT_IMPLEMENTED, so they are omitted).
+/// [`dispatch`].
 fn tools() -> Vec<serde_json::Value> {
-    vec![json!({
+    let mut tools = vec![json!({
         "name": "fujin_pack",
         "description": "Build a typed ActionPacket linked to an upstream Decision.",
         "inputSchema": {
             "type": "object",
             "properties": {
-                "source_ref": {"type": "string"}
+                "source_ref": {"type": "string"},
+                "plan_brief": {"type": "object"}
             },
             "required": ["source_ref"]
         }
-    })]
+    })];
+    for (name, description) in [
+        ("fujin_list", "List persisted ActionPackets."),
+        ("fujin_list_packets", "List persisted ActionPackets."),
+        ("fujin_get", "Get a persisted ActionPacket by source id."),
+        (
+            "fujin_get_packet",
+            "Get a persisted ActionPacket by source id.",
+        ),
+    ] {
+        let get = name.contains("get");
+        tools.push(json!({
+            "name": name,
+            "description": description,
+            "inputSchema": if get {
+                json!({"type": "object", "properties": {"id": {"type": "string"}}, "required": ["id"]})
+            } else {
+                json!({"type": "object", "properties": {"limit": {"type": "integer", "minimum": 1}}})
+            }
+        }));
+    }
+    tools
 }
 
 #[tokio::main]
 async fn main() {
     tracing_subscriber::fmt().json().init();
+    let store = Store::from_env(TOOL).await.unwrap_or_else(|e| {
+        tracing::error!(error = %e, "failed to open fujin store");
+        std::process::exit(1);
+    });
 
     serve(
         ServeConfig {
@@ -76,6 +103,7 @@ async fn main() {
         },
         Handler {
             ai: AiConfig::from_env().map(OpenAiProvider::new),
+            store,
         },
     )
     .await;
@@ -86,12 +114,36 @@ async fn main() {
 struct PackParams {
     /// Upstream Decision id, preserved as ActionPacket provenance.
     source_ref: String,
+    #[serde(default)]
+    plan_brief: Option<serde_json::Value>,
+}
+
+#[derive(serde::Deserialize)]
+struct ListParams {
+    #[serde(default = "default_limit")]
+    limit: i64,
+}
+
+#[derive(serde::Deserialize)]
+struct GetParams {
+    id: String,
+}
+
+fn default_limit() -> i64 {
+    100
+}
+
+fn storage_error(e: impl std::fmt::Display) -> (StatusCode, serde_json::Value) {
+    (
+        StatusCode::INTERNAL_SERVER_ERROR,
+        json!({"error": "storage_error", "detail": e.to_string()}),
+    )
 }
 
 /// Pure MCP dispatch over the fujin actions lib — no auth, no HTTP, so it is
-/// unit-testable directly. `fujin` is a stateless OSS skeleton: it builds typed
-/// objects but stores nothing, so read methods are unsupported.
+/// unit-testable directly. ActionPackets are persisted before success is returned.
 async fn dispatch<P: fujin::AiProvider>(
+    store: &Store,
     ai: Option<&P>,
     request_ai: bool,
     method: &str,
@@ -127,22 +179,63 @@ async fn dispatch<P: fujin::AiProvider>(
                         json!({"error": "not_ready", "missing": missing}),
                     ));
                 }
+                store
+                    .put("action_packet", &p.source_ref, &packet)
+                    .await
+                    .map_err(storage_error)?;
                 return Ok(json!({ "method": "fujin.pack", "action_packet": packet }));
             }
-            let source = LinkedItem {
-                id: p.source_ref.clone(),
-                label: p.source_ref,
+            let packet = if let Some(brief) = p.plan_brief {
+                fujin::packet_from_brief(&brief)
+            } else {
+                let source = LinkedItem {
+                    id: p.source_ref.clone(),
+                    label: p.source_ref.clone(),
+                };
+                ActionPacket {
+                    linked_decisions: vec![source],
+                    ..ActionPacket::default()
+                }
             };
-            let packet = ActionPacket {
-                linked_decisions: vec![source],
-                ..ActionPacket::default()
-            };
+            store
+                .put("action_packet", &p.source_ref, &packet)
+                .await
+                .map_err(storage_error)?;
             Ok(json!({ "method": "fujin.pack", "action_packet": packet }))
         }
-        "fujin.list" | "fujin.get" | "fujin.list_packets" | "fujin.get_packet" => Err((
-            StatusCode::NOT_IMPLEMENTED,
-            json!({"error": "unsupported", "detail": "fujin-server is stateless (OSS skeleton has no store); list/get need a storage adapter"}),
-        )),
+        "fujin.list" | "fujin.list_packets" => {
+            let p: ListParams = serde_json::from_value(params).map_err(|e| {
+                (
+                    StatusCode::BAD_REQUEST,
+                    json!({"error": "invalid_params", "detail": e.to_string()}),
+                )
+            })?;
+            let packets: Vec<ActionPacket> = store
+                .list("action_packet", p.limit)
+                .await
+                .map_err(storage_error)?;
+            Ok(json!({"method": method, "action_packets": packets}))
+        }
+        "fujin.get" | "fujin.get_packet" => {
+            let p: GetParams = serde_json::from_value(params).map_err(|e| {
+                (
+                    StatusCode::BAD_REQUEST,
+                    json!({"error": "invalid_params", "detail": e.to_string()}),
+                )
+            })?;
+            let packet: Option<ActionPacket> = store
+                .get("action_packet", &p.id)
+                .await
+                .map_err(storage_error)?;
+            packet
+                .map(|packet| json!({"method": method, "action_packet": packet}))
+                .ok_or_else(|| {
+                    (
+                        StatusCode::NOT_FOUND,
+                        json!({"error": "not_found", "detail": p.id}),
+                    )
+                })
+        }
         other => Err((
             StatusCode::BAD_REQUEST,
             json!({"error": "unknown_method", "detail": other}),
@@ -154,6 +247,33 @@ async fn dispatch<P: fujin::AiProvider>(
 mod tests {
     use super::*;
     use fujin::{AiError, AiOutput, AiRequest, ToolCall};
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static DB_SEQ: AtomicU64 = AtomicU64::new(1);
+
+    fn db_path() -> String {
+        std::env::temp_dir()
+            .join(format!(
+                "fujin-server-{}-{}.db",
+                std::process::id(),
+                DB_SEQ.fetch_add(1, Ordering::Relaxed)
+            ))
+            .to_string_lossy()
+            .into_owned()
+    }
+
+    async fn test_store() -> Store {
+        Store::open(&db_path()).await.unwrap()
+    }
+
+    async fn dispatch<P: fujin::AiProvider>(
+        ai: Option<&P>,
+        request_ai: bool,
+        method: &str,
+        params: serde_json::Value,
+    ) -> Result<serde_json::Value, (StatusCode, serde_json::Value)> {
+        super::dispatch(&test_store().await, ai, request_ai, method, params).await
+    }
 
     struct Fake(Result<Vec<AiOutput>, AiError>);
 
@@ -202,11 +322,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn read_methods_unsupported_and_unknown_method_rejected() {
-        let (code, _) = dispatch(None::<&OpenAiProvider>, false, "fujin.list", json!({}))
+    async fn read_methods_and_unknown_method_rejected() {
+        let out = dispatch(None::<&OpenAiProvider>, false, "fujin.list", json!({}))
             .await
-            .unwrap_err();
-        assert_eq!(code, StatusCode::NOT_IMPLEMENTED);
+            .unwrap();
+        assert_eq!(out["action_packets"], json!([]));
         let (code, _) = dispatch(None::<&OpenAiProvider>, false, "fujin.nope", json!({}))
             .await
             .unwrap_err();
@@ -214,17 +334,69 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn packet_maps_brief_persists_across_restart_and_write_errors_surface() {
+        let path = db_path();
+        let store = Store::open(&path).await.unwrap();
+        let created = super::dispatch(
+            &store,
+            None::<&OpenAiProvider>,
+            false,
+            "fujin.pack",
+            json!({
+                "source_ref": "decision_1",
+                "plan_brief": {
+                    "goal": "Ship storage",
+                    "in_scope": ["persist packets"],
+                    "why_now": "avoid data loss",
+                    "decisions_made": ["decision_1"]
+                }
+            }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(created["action_packet"]["goal"], "Ship storage");
+        assert_eq!(
+            created["action_packet"]["do_items"],
+            json!(["persist packets"])
+        );
+        drop(store);
+
+        let reopened = Store::open(&path).await.unwrap();
+        let got = super::dispatch(
+            &reopened,
+            None::<&OpenAiProvider>,
+            false,
+            "fujin.get_packet",
+            json!({"id": "decision_1"}),
+        )
+        .await
+        .unwrap();
+        assert_eq!(got["action_packet"]["goal"], "Ship storage");
+
+        reopened.pool().close().await;
+        let (code, body) = super::dispatch(
+            &reopened,
+            None::<&OpenAiProvider>,
+            false,
+            "fujin.pack",
+            json!({"source_ref": "decision_2"}),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(code, StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(body["error"], "storage_error");
+    }
+
+    #[tokio::test]
     async fn tools_list_names_are_all_dispatchable() {
         for tool in tools() {
             let name = tool["name"].as_str().unwrap();
             let method = name.replacen('_', ".", 1);
-            let (_, body) = dispatch(None::<&OpenAiProvider>, false, &method, json!({}))
-                .await
-                .expect_err("empty params must not satisfy any real method");
-            assert_ne!(
-                body["error"], "unknown_method",
-                "{method} must be a real dispatch method"
-            );
+            if let Err((_, body)) =
+                dispatch(None::<&OpenAiProvider>, false, &method, json!({})).await
+            {
+                assert_ne!(body["error"], "unknown_method", "{method} must be real");
+            }
         }
     }
 
