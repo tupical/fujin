@@ -32,11 +32,10 @@ impl Maturity {
 /// Assess an [`ActionPacket`] against the §13 contract.
 ///
 /// A field counts as "present" if it carries content: string fields must
-/// be non-blank (after trimming); list fields must be non-empty *and*
-/// every element in them must itself carry content (no blank strings, no
-/// structs with blank required sub-fields) — a list padded with empty
-/// placeholders is not a filled field. The checks run in §13 order so
-/// `missing` reads as a checklist.
+/// be non-blank (after trimming); required list fields must be non-empty
+/// and every element must carry content. Optional provenance fields may
+/// be empty, but values that are present must still be complete. The checks
+/// run in §13 order so `missing` reads as a checklist.
 pub fn assess(packet: &ActionPacket) -> Maturity {
     let mut missing = Vec::new();
 
@@ -48,6 +47,9 @@ pub fn assess(packet: &ActionPacket) -> Maturity {
     }
     fn structs_present<T>(items: &[T], all_ok: impl Fn(&T) -> bool) -> bool {
         !items.is_empty() && items.iter().all(all_ok)
+    }
+    fn structs_valid_or_empty<T>(items: &[T], all_ok: impl Fn(&T) -> bool) -> bool {
+        items.is_empty() || items.iter().all(all_ok)
     }
 
     if !str_present(&packet.goal) {
@@ -77,7 +79,7 @@ pub fn assess(packet: &ActionPacket) -> Maturity {
     if !list_present(&packet.dependencies) {
         missing.push("dependencies");
     }
-    if !structs_present(&packet.required_documents, |d| {
+    if !structs_valid_or_empty(&packet.required_documents, |d| {
         str_present(&d.title) && str_present(&d.uri)
     }) {
         missing.push("required_documents");
@@ -87,12 +89,12 @@ pub fn assess(packet: &ActionPacket) -> Maturity {
     }) {
         missing.push("linked_decisions");
     }
-    if !structs_present(&packet.linked_knowledge, |i| {
+    if !structs_valid_or_empty(&packet.linked_knowledge, |i| {
         str_present(&i.id) && str_present(&i.label)
     }) {
         missing.push("linked_knowledge");
     }
-    if !structs_present(&packet.linked_rejected, |i| {
+    if !structs_valid_or_empty(&packet.linked_rejected, |i| {
         str_present(&i.id) && str_present(&i.label)
     }) {
         missing.push("linked_rejected");
@@ -164,7 +166,6 @@ mod tests {
     fn empty_packet_lists_every_missing_field() {
         match assess(&ActionPacket::default()) {
             Maturity::NotReady { missing } => {
-                // All 16 §13 fields are flagged, in declaration order.
                 assert_eq!(
                     missing,
                     vec![
@@ -177,10 +178,7 @@ mod tests {
                         "constraints",
                         "risks",
                         "dependencies",
-                        "required_documents",
                         "linked_decisions",
-                        "linked_knowledge",
-                        "linked_rejected",
                         "expected_artifacts",
                         "before_start",
                         "before_complete",
@@ -243,6 +241,59 @@ mod tests {
     }
 
     #[test]
+    fn malformed_optional_lineage_is_not_ready() {
+        let mut p = full_packet();
+        p.required_documents[0].uri = " ".into();
+        p.linked_knowledge[0].id = " ".into();
+        p.linked_rejected[0].label = " ".into();
+
+        assert_eq!(
+            assess(&p),
+            Maturity::NotReady {
+                missing: vec![
+                    "required_documents".to_string(),
+                    "linked_knowledge".to_string(),
+                    "linked_rejected".to_string(),
+                ]
+            }
+        );
+    }
+
+    #[test]
+    fn optional_lineage_fields_may_be_empty() {
+        let mut p = full_packet();
+        p.required_documents.clear();
+        p.linked_rejected.clear();
+
+        assert_eq!(assess(&p), Maturity::Ready);
+    }
+
+    #[test]
+    fn knowledge_lineage_may_be_empty_for_non_knowledge_sensing() {
+        let mut p = full_packet();
+        p.required_documents.clear();
+        p.linked_knowledge.clear();
+        p.linked_rejected.clear();
+
+        assert_eq!(assess(&p), Maturity::Ready);
+    }
+
+    #[test]
+    fn missing_decision_lineage_is_not_ready() {
+        let mut p = full_packet();
+        p.required_documents.clear();
+        p.linked_rejected.clear();
+        p.linked_decisions.clear();
+
+        assert_eq!(
+            assess(&p),
+            Maturity::NotReady {
+                missing: vec!["linked_decisions".to_string()]
+            }
+        );
+    }
+
+    #[test]
     fn assessment_is_deterministic() {
         let p = full_packet();
         assert_eq!(assess(&p), assess(&p));
@@ -250,7 +301,7 @@ mod tests {
 
     // ── Per-field NotReady tests ──────────────────────────────────────────────
     //
-    // For each of the 16 §13 required fields: start from a fully-filled packet,
+    // For each required §13 field: start from a fully-filled packet,
     // clear exactly one field, and assert that assess() returns NotReady with
     // exactly that field name in `missing`.
 
@@ -266,10 +317,7 @@ mod tests {
             "constraints" => p.constraints.clear(),
             "risks" => p.risks.clear(),
             "dependencies" => p.dependencies.clear(),
-            "required_documents" => p.required_documents.clear(),
             "linked_decisions" => p.linked_decisions.clear(),
-            "linked_knowledge" => p.linked_knowledge.clear(),
-            "linked_rejected" => p.linked_rejected.clear(),
             "expected_artifacts" => p.expected_artifacts.clear(),
             "before_start" => p.before_start.clear(),
             "before_complete" => p.before_complete.clear(),
@@ -290,10 +338,7 @@ mod tests {
             "constraints",
             "risks",
             "dependencies",
-            "required_documents",
             "linked_decisions",
-            "linked_knowledge",
-            "linked_rejected",
             "expected_artifacts",
             "before_start",
             "before_complete",

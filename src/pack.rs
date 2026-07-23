@@ -72,6 +72,27 @@ pub async fn pack_ai<P: AiProvider>(
         .ok_or_else(|| ActionsError::ai("pack_ai: model returned no build_action_packet call"))?;
     let mut packet: ActionPacket =
         serde_json::from_str(&call.arguments).map_err(|e| ActionsError::serde(e.to_string()))?;
+    let from_brief = crate::packet_from_brief(&context["plan_brief"]);
+    if packet.linked_rejected.is_empty() {
+        packet.linked_rejected = from_brief.linked_rejected;
+    }
+    if packet.linked_knowledge.is_empty() {
+        packet.linked_knowledge = match (
+            context["sensing_item"]["kind"].as_str(),
+            context["sensing_item"]["id"].as_str(),
+            context["sensing_item"]["body"].as_str(),
+        ) {
+            (Some("knowledge"), Some(id), Some(body))
+                if !id.trim().is_empty() && !body.trim().is_empty() =>
+            {
+                vec![LinkedItem {
+                    id: id.to_owned(),
+                    label: body.to_owned(),
+                }]
+            }
+            _ => from_brief.linked_knowledge,
+        };
+    }
     packet.linked_decisions = vec![LinkedItem {
         id: source_ref.to_owned(),
         label: source_ref.to_owned(),

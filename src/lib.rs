@@ -73,13 +73,6 @@ pub fn packet_from_brief(brief: &serde_json::Value) -> ActionPacket {
         constraints: strings(brief, "constraints"),
         risks: strings(brief, "risks"),
         dependencies: strings(brief, "dependencies"),
-        required_documents: strings(brief, "required_artifacts")
-            .into_iter()
-            .map(|title| RequiredDocument {
-                uri: format!("artifact://{title}"),
-                title,
-            })
-            .collect(),
         linked_decisions: linked(strings(brief, "decisions_made")),
         linked_knowledge: linked(strings(brief, "knowledge_base")),
         linked_rejected: linked(strings(brief, "rejected_alternatives")),
@@ -99,11 +92,13 @@ mod adapter_tests {
             "daruma_target": "one task",
             "in_scope": ["persist artifacts"],
             "why_now": "avoid data loss",
-            "decisions_made": ["dec_1"]
+            "decisions_made": ["dec_1"],
+            "required_artifacts": ["manifest"]
         }));
         assert_eq!(packet.goal, "Ship storage");
         assert_eq!(packet.do_items, ["persist artifacts"]);
         assert_eq!(packet.why, "avoid data loss");
         assert_eq!(packet.linked_decisions[0].id, "dec_1");
+        assert!(packet.required_documents.is_empty());
     }
 }
