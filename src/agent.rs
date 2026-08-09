@@ -61,11 +61,11 @@ pub struct NewPlan {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub success_criteria: Option<Vec<String>>,
     /// Provenance lowered from the Action Packet's §13 `linked_*` fields
-    /// via `HandoffProject` (manifest §6, "родословная задач"). Not part
-    /// of the real `daruma_domain::NewPlan` wire shape yet — the host
-    /// decides how to persist it when dispatching (e.g. folded into
-    /// `description`/`source_brief`); Actions only guarantees these
-    /// references survive the actions→execution lowering step.
+    /// via `HandoffProject` (manifest §6, "родословная задач"). The
+    /// `linked_*` fields are not part of the Daruma domain form; when lowering
+    /// to execution, a host is expected to fold these references into
+    /// `daruma_domain::NewPlan::source_brief` (`mcpbox-pipeline` does so).
+    /// Actions guarantees only that they survive the actions→execution hop.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub linked_decisions: Vec<LinkedItem>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
