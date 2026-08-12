@@ -147,6 +147,14 @@ fn storage_error(e: impl std::fmt::Display) -> (StatusCode, serde_json::Value) {
     )
 }
 
+const METHODS: &[&str] = &[
+    "fujin.pack",
+    "fujin.list",
+    "fujin.list_packets",
+    "fujin.get",
+    "fujin.get_packet",
+];
+
 /// Pure MCP dispatch over the fujin actions lib — no auth, no HTTP, so it is
 /// unit-testable directly. ActionPackets are persisted before success is returned.
 async fn dispatch<P: fujin::AiProvider>(
@@ -156,6 +164,12 @@ async fn dispatch<P: fujin::AiProvider>(
     method: &str,
     params: serde_json::Value,
 ) -> Result<serde_json::Value, (StatusCode, serde_json::Value)> {
+    if !METHODS.contains(&method) {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            json!({"error": "unknown_method", "detail": method}),
+        ));
+    }
     match method {
         "fujin.pack" => {
             let context = params.clone();
@@ -428,6 +442,11 @@ mod tests {
                 assert_ne!(body["error"], "unknown_method", "{method} must be real");
             }
         }
+    }
+
+    #[test]
+    fn tools_catalogue_matches_methods() {
+        layer_kit::test_support::assert_catalogue_matches(&tools(), METHODS);
     }
 
     #[tokio::test]
