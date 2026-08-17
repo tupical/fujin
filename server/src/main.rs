@@ -12,7 +12,7 @@
 //! /v1/mcp is closed), FUJIN_VERSION, and the optional OPENAI_* fallback.
 
 use axum::http::StatusCode;
-use fujin::{ActionPacket, LinkedItem, Maturity};
+use fujin::{ActionPacket, Maturity};
 use layer_kit::ai::extract_ai_config;
 use layer_kit::auth::Claims;
 use layer_kit::openai::{AiConfig, OpenAiProvider};
@@ -46,7 +46,8 @@ impl McpHandler for Handler {
             )
             .await
         } else {
-            dispatch(&self.store, self.ai.as_ref(), None, method, params).await
+            let model = self.ai.as_ref().map(|provider| provider.model());
+            dispatch(&self.store, self.ai.as_ref(), model, method, params).await
         }
     }
 
@@ -60,7 +61,10 @@ impl McpHandler for Handler {
 fn tools() -> Vec<serde_json::Value> {
     let mut tools = vec![json!({
         "name": "fujin_pack",
-        "description": "Build a typed ActionPacket linked to an upstream Decision.",
+        "description": "Build a typed ActionPacket linked to an upstream Decision. \
+            Requires an AI provider (an `ai` block in the params or OPENAI_API_KEY on the \
+            server); without one the method answers 503 ai_not_configured. `plan_brief` \
+            is passed to the model as grounding context.",
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -143,8 +147,6 @@ async fn main() {
 struct PackParams {
     /// Upstream Decision id, preserved as ActionPacket provenance.
     source_ref: String,
-    #[serde(default)]
-    plan_brief: Option<serde_json::Value>,
 }
 
 #[derive(serde::Deserialize)]
@@ -209,6 +211,18 @@ fn storage_error(e: impl std::fmt::Display) -> (StatusCode, serde_json::Value) {
     )
 }
 
+/// Error when no AI provider is configured for this request: an honest 503
+/// naming the lever, not just the cause.
+fn ai_not_configured() -> (StatusCode, serde_json::Value) {
+    (
+        StatusCode::SERVICE_UNAVAILABLE,
+        json!({
+            "error": "ai_not_configured",
+            "detail": "no AI provider for this request: pass an `ai` block in params or set OPENAI_API_KEY; a mature Action Packet is assembled only by the model — fujin will not synthesize one"
+        }),
+    )
+}
+
 const METHODS: &[&str] = &[
     "fujin.pack",
     "fujin.list",
@@ -242,54 +256,40 @@ async fn dispatch<P: fujin::AiProvider>(
                     json!({"error": "invalid_params", "detail": e.to_string()}),
                 )
             })?;
-            if let Some(model) = model {
-                let provider = ai.ok_or_else(|| {
+            // Gate on the PROVIDER, not on the model string — the env
+            // fallback (OPENAI_*) is a provider too. `model` only feeds
+            // `_meta`. Without a provider there is no honest non-AI path:
+            // `packet_from_brief` leaves `expected_artifacts`,
+            // `before_start`, `before_complete` empty, so any packet built
+            // here is guaranteed NotReady — refuse instead of persisting an
+            // immature packet as success.
+            let provider = ai.ok_or_else(ai_not_configured)?;
+            let (packet, usage) = fujin::pack_ai(provider, &context, &p.source_ref)
+                .await
+                .map_err(|e| {
                     (
-                        StatusCode::SERVICE_UNAVAILABLE,
-                        json!({"error": "ai_not_configured", "detail": "AI provider is not configured"}),
+                        StatusCode::BAD_GATEWAY,
+                        json!({"error": "ai_error", "detail": e.to_string()}),
                     )
                 })?;
-                let (packet, usage) = fujin::pack_ai(provider, &context, &p.source_ref)
-                    .await
-                    .map_err(|e| {
-                        (
-                            StatusCode::BAD_GATEWAY,
-                            json!({"error": "ai_error", "detail": e.to_string()}),
-                        )
-                    })?;
-                if let Maturity::NotReady { missing } = fujin::assess(&packet) {
-                    return Err((
-                        StatusCode::UNPROCESSABLE_ENTITY,
-                        json!({"error": "not_ready", "missing": missing}),
-                    ));
-                }
-                store
-                    .put("action_packet", &p.source_ref, &packet)
-                    .await
-                    .map_err(storage_error)?;
-                let mut meta = json!({"model": model});
-                if let Some(usage) = usage {
-                    meta["usage"] = json!(usage);
-                }
-                return Ok(json!({ "method": "fujin.pack", "action_packet": packet, "_meta": meta }));
+            if let Maturity::NotReady { missing } = fujin::assess(&packet) {
+                return Err((
+                    StatusCode::UNPROCESSABLE_ENTITY,
+                    json!({"error": "not_ready", "missing": missing}),
+                ));
             }
-            let packet = if let Some(brief) = p.plan_brief {
-                fujin::packet_from_brief(&brief)
-            } else {
-                let source = LinkedItem {
-                    id: p.source_ref.clone(),
-                    label: p.source_ref.clone(),
-                };
-                ActionPacket {
-                    linked_decisions: vec![source],
-                    ..ActionPacket::default()
-                }
-            };
             store
                 .put("action_packet", &p.source_ref, &packet)
                 .await
                 .map_err(storage_error)?;
-            Ok(json!({ "method": "fujin.pack", "action_packet": packet }))
+            let mut meta = json!({});
+            if let Some(model) = model {
+                meta["model"] = json!(model);
+            }
+            if let Some(usage) = usage {
+                meta["usage"] = json!(usage);
+            }
+            Ok(json!({ "method": "fujin.pack", "action_packet": packet, "_meta": meta }))
         }
         "fujin.list" | "fujin.list_packets" => {
             let p: ListParams = serde_json::from_value(params).map_err(|e| {
@@ -443,8 +443,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn pack_builds_action_packet_with_decision_provenance() {
-        let out = dispatch(
+    async fn pack_without_ai_refuses_instead_of_returning_immature_packet() {
+        let (code, body) = dispatch(
             None::<&OpenAiProvider>,
             false,
             "fujin.pack",
@@ -453,11 +453,58 @@ mod tests {
             }),
         )
         .await
-        .expect("pack must succeed");
-        let packet = &out["action_packet"];
-        assert_eq!(out["method"], "fujin.pack");
-        assert_eq!(packet["linked_decisions"][0]["id"], "dec_abc");
-        assert!(out.get("_meta").is_none());
+        .expect_err("pack without a provider must be refused");
+        assert_eq!(code, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(body["error"], "ai_not_configured");
+    }
+
+    #[tokio::test]
+    async fn pack_with_provider_and_no_model_builds_packet() {
+        // The env-fallback configuration: a provider (OPENAI_*) but no model
+        // string passed down. The gate is on the provider, not on `model` —
+        // the packet must be built, not refused.
+        let fake = Fake(Ok(vec![AiOutput::ToolCall(ToolCall {
+            name: "build_action_packet".into(),
+            arguments: packet_args("Ship auth").to_string(),
+        })]));
+        let out = dispatch(
+            Some(&fake),
+            false,
+            "fujin.pack",
+            json!({"source_ref": "dec_env"}),
+        )
+        .await
+        .expect("pack with a provider but no model must succeed");
+        assert_eq!(out["action_packet"]["goal"], "Ship auth");
+        assert_eq!(out["_meta"]["usage"]["total_tokens"], 168);
+        assert!(out["_meta"].get("model").is_none());
+    }
+
+    #[tokio::test]
+    async fn plan_brief_reaches_pack_ai_fallback() {
+        // Pins the `params.clone()` → `pack.rs` fallback link: the Fake
+        // returns a packet with EMPTY `linked_rejected`, so only the
+        // `plan_brief` in the untyped context can fill it. If dispatch ever
+        // rebuilds the context from parsed params, the brief stops reaching
+        // `pack_ai` and this test fails.
+        let mut args = packet_args("Ship auth");
+        args["linked_rejected"] = json!([]);
+        let fake = Fake(Ok(vec![AiOutput::ToolCall(ToolCall {
+            name: "build_action_packet".into(),
+            arguments: args.to_string(),
+        })]));
+        let out = dispatch(
+            Some(&fake),
+            true,
+            "fujin.pack",
+            json!({
+                "source_ref": "dec_abc",
+                "plan_brief": {"rejected_alternatives": ["alt_1"]}
+            }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(out["action_packet"]["linked_rejected"][0]["id"], "alt_1");
     }
 
     #[tokio::test]
@@ -473,10 +520,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn packet_maps_brief_persists_across_restart_and_write_errors_surface() {
+    async fn pack_without_ai_persists_nothing_and_storage_errors_surface() {
         let path = db_path();
         let store = Store::open(&path).await.unwrap();
-        let created = super::dispatch(
+
+        // With a plan_brief: refused, nothing persisted.
+        let (code, body) = super::dispatch(
             &store,
             None::<&OpenAiProvider>,
             None,
@@ -492,16 +541,46 @@ mod tests {
             }),
         )
         .await
-        .unwrap();
-        assert_eq!(created["action_packet"]["goal"], "Ship storage");
-        assert_eq!(
-            created["action_packet"]["do_items"],
-            json!(["persist packets"])
-        );
+        .unwrap_err();
+        assert_eq!(code, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(body["error"], "ai_not_configured");
+
+        // Without a plan_brief: same refusal.
+        let (code, body) = super::dispatch(
+            &store,
+            None::<&OpenAiProvider>,
+            None,
+            "fujin.pack",
+            json!({"source_ref": "decision_2"}),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(code, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(body["error"], "ai_not_configured");
+
+        let stored: Option<ActionPacket> =
+            store.get("action_packet", "decision_1").await.unwrap();
+        assert!(stored.is_none());
+
+        // A packet persisted before shutdown must survive a restart.
+        let packet: ActionPacket = serde_json::from_value(packet_args("Ship storage")).unwrap();
+        store.put("action_packet", "kept", &packet).await.unwrap();
         drop(store);
 
+        // After a restart: the kept packet reads back (200), the refused one
+        // is still absent (404).
         let reopened = Store::open(&path).await.unwrap();
-        let got = super::dispatch(
+        let out = super::dispatch(
+            &reopened,
+            None::<&OpenAiProvider>,
+            None,
+            "fujin.get_packet",
+            json!({"id": "kept"}),
+        )
+        .await
+        .expect("a packet persisted before restart must read back after it");
+        assert_eq!(out["action_packet"]["goal"], "Ship storage");
+        let (code, _) = super::dispatch(
             &reopened,
             None::<&OpenAiProvider>,
             None,
@@ -509,16 +588,41 @@ mod tests {
             json!({"id": "decision_1"}),
         )
         .await
-        .unwrap();
-        assert_eq!(got["action_packet"]["goal"], "Ship storage");
+        .unwrap_err();
+        assert_eq!(code, StatusCode::NOT_FOUND);
 
+        // Storage errors still surface as 500 storage_error (via a read now
+        // that non-AI pack never reaches the store).
         reopened.pool().close().await;
         let (code, body) = super::dispatch(
             &reopened,
             None::<&OpenAiProvider>,
             None,
+            "fujin.list",
+            json!({}),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(code, StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(body["error"], "storage_error");
+    }
+
+    #[tokio::test]
+    async fn pack_ai_path_storage_error_surfaces() {
+        // The AI path also persists; with a broken store it must answer 500
+        // storage_error, not panic.
+        let store = test_store().await;
+        store.pool().close().await;
+        let fake = Fake(Ok(vec![AiOutput::ToolCall(ToolCall {
+            name: "build_action_packet".into(),
+            arguments: packet_args("Ship auth").to_string(),
+        })]));
+        let (code, body) = super::dispatch(
+            &store,
+            Some(&fake),
+            Some("test"),
             "fujin.pack",
-            json!({"source_ref": "decision_2"}),
+            json!({"source_ref": "dec_abc"}),
         )
         .await
         .unwrap_err();
@@ -587,9 +691,11 @@ mod tests {
             name: "build_action_packet".into(),
             arguments: packet_args("").to_string(),
         })]));
-        let (code, body) = dispatch(
+        let store = test_store().await;
+        let (code, body) = super::dispatch(
+            &store,
             Some(&fake),
-            true,
+            Some("test"),
             "fujin.pack",
             json!({"source_ref": "dec_abc"}),
         )
@@ -598,6 +704,14 @@ mod tests {
         assert_eq!(code, StatusCode::UNPROCESSABLE_ENTITY);
         assert_eq!(body["error"], "not_ready");
         assert!(body["missing"].as_array().unwrap().contains(&json!("goal")));
+        // The 422 must also mean NOTHING was persisted: if store.put ever
+        // moved above the maturity gate, fujin.pack would still answer 422,
+        // but the immature packet would leak into the store and later leave
+        // via fujin.get as 200 — breaking the "immature packet never leaves
+        // as success" invariant through the read path.
+        let stored: Option<serde_json::Value> =
+            store.get("action_packet", "dec_abc").await.unwrap();
+        assert!(stored.is_none(), "immature packet must not be persisted");
     }
 
     #[tokio::test]
