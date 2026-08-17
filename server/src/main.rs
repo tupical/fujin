@@ -69,6 +69,28 @@ fn tools() -> Vec<serde_json::Value> {
             },
             "required": ["source_ref"]
         }
+    }), json!({
+        "name": "fujin_assess",
+        "description": "Run the §13 maturity gate on an ActionPacket. \
+            Input: `action_packet` (packet JSON in the body; partial packets are accepted — \
+            absent §13 keys are assessed as missing) or `id` — the source id the packet is \
+            persisted under (e.g. `dec_1`), NOT `action_packet.id` (`ap_dec_1`); \
+            if both are given, `action_packet` wins and `id` is ignored; with neither, \
+            invalid_params is returned. \
+            Output: {\"method\": \"fujin.assess\", \"ready\": bool, \"missing\": [field names]}. \
+            A not-ready verdict is HTTP 200 with ready=false — assess is a query, not a gate \
+            (unlike fujin_pack, which answers 422 not_ready); treat any non-2xx here as a \
+            malformed request or server failure, never as \"not mature\". \
+            On ready=false, `missing` names the §13 fields to fill; fill them and re-assess — \
+            only a ready packet may go to handoff.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "action_packet": {"type": "object"},
+                "id": {"type": "string"}
+            },
+            "anyOf": [{"required": ["action_packet"]}, {"required": ["id"]}]
+        }
     })];
     for (name, description) in [
         ("fujin_list", "List persisted ActionPackets."),
@@ -136,6 +158,46 @@ struct GetParams {
     id: String,
 }
 
+/// Params for `fujin.assess`. `action_packet` stays raw JSON here: a
+/// partial packet is the main use case ("tell me what is missing"), so the
+/// body is overlaid onto a default packet before parsing — missing §13 keys
+/// are reported by `assess` itself, not by serde.
+#[derive(serde::Deserialize)]
+struct AssessParams {
+    #[serde(default)]
+    action_packet: Option<serde_json::Value>,
+    #[serde(default)]
+    id: Option<String>,
+}
+
+/// Parse an assess request body into an [`ActionPacket`], tolerating a
+/// partial packet: absent §13 keys fall back to the empty defaults so
+/// `fujin::assess` can name them in `missing`. Non-object bodies and type
+/// errors on the keys that are present remain `invalid_params`.
+fn parse_assess_packet(
+    body: serde_json::Value,
+) -> Result<ActionPacket, (StatusCode, serde_json::Value)> {
+    let invalid = |detail: String| {
+        (
+            StatusCode::BAD_REQUEST,
+            json!({"error": "invalid_params", "detail": detail}),
+        )
+    };
+    let body = body
+        .as_object()
+        .ok_or_else(|| invalid("`action_packet` must be an object".into()))?;
+    let mut base = serde_json::to_value(ActionPacket::default())
+        .expect("default packet serializes")
+        .as_object()
+        .expect("packet serializes to an object")
+        .clone();
+    for (key, value) in body {
+        base.insert(key.clone(), value.clone());
+    }
+    serde_json::from_value(serde_json::Value::Object(base))
+        .map_err(|e| invalid(e.to_string()))
+}
+
 fn default_limit() -> i64 {
     100
 }
@@ -153,6 +215,7 @@ const METHODS: &[&str] = &[
     "fujin.list_packets",
     "fujin.get",
     "fujin.get_packet",
+    "fujin.assess",
 ];
 
 /// Pure MCP dispatch over the fujin actions lib — no auth, no HTTP, so it is
@@ -260,6 +323,38 @@ async fn dispatch<P: fujin::AiProvider>(
                         json!({"error": "not_found", "detail": p.id}),
                     )
                 })
+        }
+        "fujin.assess" => {
+            let p: AssessParams = serde_json::from_value(params).map_err(|e| {
+                (
+                    StatusCode::BAD_REQUEST,
+                    json!({"error": "invalid_params", "detail": e.to_string()}),
+                )
+            })?;
+            let packet = if let Some(body) = p.action_packet {
+                parse_assess_packet(body)?
+            } else if let Some(id) = p.id {
+                store
+                    .get("action_packet", &id)
+                    .await
+                    .map_err(storage_error)?
+                    .ok_or_else(|| {
+                        (
+                            StatusCode::NOT_FOUND,
+                            json!({"error": "not_found", "detail": id}),
+                        )
+                    })?
+            } else {
+                return Err((
+                    StatusCode::BAD_REQUEST,
+                    json!({"error": "invalid_params", "detail": "pass `action_packet` (packet JSON) or `id` of a persisted packet"}),
+                ));
+            };
+            let (ready, missing) = match fujin::assess(&packet) {
+                Maturity::Ready => (true, Vec::new()),
+                Maturity::NotReady { missing } => (false, missing),
+            };
+            Ok(json!({"method": method, "ready": ready, "missing": missing}))
         }
         other => Err((
             StatusCode::BAD_REQUEST,
@@ -517,5 +612,178 @@ mod tests {
         .unwrap_err();
         assert_eq!(code, StatusCode::BAD_GATEWAY);
         assert_eq!(body["error"], "ai_error");
+    }
+
+    #[tokio::test]
+    async fn assess_mature_packet_in_body_is_ready() {
+        let out = dispatch(
+            None::<&OpenAiProvider>,
+            false,
+            "fujin.assess",
+            json!({"action_packet": packet_args("Ship auth")}),
+        )
+        .await
+        .unwrap();
+        assert_eq!(out["method"], "fujin.assess");
+        assert_eq!(out["ready"], true);
+        assert_eq!(out["missing"], json!([]));
+    }
+
+    #[tokio::test]
+    async fn assess_immature_packet_names_missing_fields() {
+        let mut args = packet_args("");
+        args["do_items"] = json!([]);
+        let out = dispatch(
+            None::<&OpenAiProvider>,
+            false,
+            "fujin.assess",
+            json!({"action_packet": args}),
+        )
+        .await
+        .unwrap();
+        assert_eq!(out["method"], "fujin.assess");
+        assert_eq!(out["ready"], false);
+        assert_eq!(out["missing"], json!(["goal", "do_items"]));
+    }
+
+    #[tokio::test]
+    async fn assess_by_id_reads_persisted_packet() {
+        let store = test_store().await;
+        let packet: ActionPacket = serde_json::from_value(packet_args("Ship storage")).unwrap();
+        store.put("action_packet", "pkt_1", &packet).await.unwrap();
+        let out = super::dispatch(
+            &store,
+            None::<&OpenAiProvider>,
+            None,
+            "fujin.assess",
+            json!({"id": "pkt_1"}),
+        )
+        .await
+        .unwrap();
+        assert_eq!(out["method"], "fujin.assess");
+        assert_eq!(out["ready"], true);
+        assert_eq!(out["missing"], json!([]));
+    }
+
+    #[tokio::test]
+    async fn assess_body_wins_over_id() {
+        // A mature packet in the body plus an id that does not exist in the
+        // store must still succeed — `action_packet` takes priority.
+        let out = dispatch(
+            None::<&OpenAiProvider>,
+            false,
+            "fujin.assess",
+            json!({"action_packet": packet_args("Ship auth"), "id": "no_such_packet"}),
+        )
+        .await
+        .unwrap();
+        assert_eq!(out["ready"], true);
+    }
+
+    #[tokio::test]
+    async fn assess_requires_packet_or_id() {
+        let (code, body) = dispatch(None::<&OpenAiProvider>, false, "fujin.assess", json!({}))
+            .await
+            .unwrap_err();
+        assert_eq!(code, StatusCode::BAD_REQUEST);
+        assert_eq!(body["error"], "invalid_params");
+    }
+
+    #[tokio::test]
+    async fn assess_unknown_id_is_not_found() {
+        let (code, body) = dispatch(
+            None::<&OpenAiProvider>,
+            false,
+            "fujin.assess",
+            json!({"id": "no_such_packet"}),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(code, StatusCode::NOT_FOUND);
+        assert_eq!(body["error"], "not_found");
+    }
+
+    #[tokio::test]
+    async fn assess_partial_packet_names_absent_keys_as_missing() {
+        // The main use case: a packet that only carries some §13 keys must
+        // get a 200 ready=false whose `missing` names the absent keys, on
+        // par with empty ones — not a 400 from serde.
+        let out = dispatch(
+            None::<&OpenAiProvider>,
+            false,
+            "fujin.assess",
+            json!({"action_packet": {"goal": "x", "do_items": ["y"]}}),
+        )
+        .await
+        .unwrap();
+        assert_eq!(out["method"], "fujin.assess");
+        assert_eq!(out["ready"], false);
+        // Strict full-list check, in §13 order: every absent key must be
+        // named, and the two present keys (goal, do_items) must not be.
+        assert_eq!(
+            out["missing"],
+            json!([
+                "context",
+                "why",
+                "do_not",
+                "completion_criteria",
+                "constraints",
+                "risks",
+                "dependencies",
+                "linked_decisions",
+                "expected_artifacts",
+                "before_start",
+                "before_complete",
+            ])
+        );
+    }
+
+    #[tokio::test]
+    async fn assess_tolerates_platform_id_inside_packet() {
+        // mcpbox.ru injects an id like "ap_<decision_id>" into the packet it
+        // sends back in `action_packet`. ActionPacket has no
+        // deny_unknown_fields, so the extra key must be ignored — if the
+        // struct ever gains it, the platform path breaks and this test
+        // should be the one to say so.
+        let mut args = packet_args("Ship auth");
+        args["id"] = json!("ap_dec_1");
+        let out = dispatch(
+            None::<&OpenAiProvider>,
+            false,
+            "fujin.assess",
+            json!({"action_packet": args}),
+        )
+        .await
+        .unwrap();
+        assert_eq!(out["method"], "fujin.assess");
+        assert_eq!(out["ready"], true);
+        assert_eq!(out["missing"], json!([]));
+    }
+
+    #[tokio::test]
+    async fn assess_malformed_action_packet_is_invalid_params() {
+        // Non-object body.
+        let (code, body) = dispatch(
+            None::<&OpenAiProvider>,
+            false,
+            "fujin.assess",
+            json!({"action_packet": "not an object"}),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(code, StatusCode::BAD_REQUEST);
+        assert_eq!(body["error"], "invalid_params");
+
+        // Object, but a present key has the wrong type.
+        let (code, body) = dispatch(
+            None::<&OpenAiProvider>,
+            false,
+            "fujin.assess",
+            json!({"action_packet": {"goal": 5}}),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(code, StatusCode::BAD_REQUEST);
+        assert_eq!(body["error"], "invalid_params");
     }
 }
