@@ -1,0 +1,33 @@
+# systemd --user unit for fujin-server (mcpbox meisei actions tool).
+# Independent deploy unit: updating fujin rebuilds/redeploys ONLY this service,
+# never the mcpbox platform or daruma.
+#
+# Install: copy the built binary to ~/.local/bin/fujin-server, drop this file at
+# ~/.config/systemd/user/fujin-server.service, put FUJIN_PLATFORM_SECRET (the
+# platform-shared key) in ~/.config/fujin/fujin.env, then:
+#   systemctl --user daemon-reload && systemctl --user enable --now fujin-server
+# Front it with nginx `fujin.mcpbox.ru -> 127.0.0.1:$FUJIN_PORT` and upsert the
+# tool_registry row on the platform.
+
+[Unit]
+Description=fujin-server (mcpbox meisei actions tool)
+After=network-online.target
+
+[Service]
+Environment=FUJIN_PORT=8094
+Environment=FUJIN_VERSION=0.1.0
+# Persistent object/event store; create %h/.local/share/fujin before first start.
+Environment=FUJIN_DB=%h/.local/share/fujin/fujin.db
+# FUJIN_PLATFORM_SECRET (and any future keys) live here, NOT in this unit:
+# OPENAI_API_KEY[/OPENAI_BASE_URL/OPENAI_MODEL] (the optional AI fallback for
+# `fujin.pack`) also goes there — without it the method answers
+# ai_not_configured (503).
+EnvironmentFile=-%h/.config/fujin/fujin.env
+ExecStartPre=/usr/bin/mkdir -p %h/.local/share/fujin
+ExecStart=%h/.local/bin/fujin-server
+Restart=always
+RestartSec=3
+NoNewPrivileges=true
+
+[Install]
+WantedBy=default.target
