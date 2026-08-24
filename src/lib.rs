@@ -26,8 +26,8 @@ pub mod packet;
 pub use agent::{Actor, ActorKind, NewPlan, NewTask, ProjectId};
 pub use ai::{AiError, AiOutput, AiProvider, AiRequest, AiUsage, ToolCall};
 pub use error::ActionsError;
-pub use handoff::{into_new_plan, to_handoff, NewPlanWithTasks};
-pub use maturity::{assess, Maturity};
+pub use handoff::{into_new_plan, to_handoff, to_handoff_with, NewPlanWithTasks};
+pub use maturity::{assess, assess_with, FujinStrictness, Maturity};
 pub use minimality::{
     check_minimality, CodeActionMinimality, DebtMarker, DependencyJustification, EvidenceCheck,
     MinimalityCheck, MinimalityPolicy, MinimalityVerdict, ProtectedRequirements,

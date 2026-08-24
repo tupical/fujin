@@ -29,6 +29,22 @@ impl Maturity {
     }
 }
 
+/// How strictly the optional §13 provenance trio is gated.
+///
+/// Under [`FujinStrictness::Soft`] the three provenance fields
+/// (`required_documents`, `linked_knowledge`, `linked_rejected`) may stay
+/// empty as long as any present values are complete. Under
+/// [`FujinStrictness::Strict`] they must additionally be non-empty.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FujinStrictness {
+    /// Current behaviour: provenance fields are valid-or-empty.
+    #[default]
+    Soft,
+    /// Provenance fields must be non-empty *and* valid.
+    Strict,
+}
+
 /// Assess an [`ActionPacket`] against the §13 contract.
 ///
 /// A field counts as "present" if it carries content: string fields must
@@ -37,6 +53,17 @@ impl Maturity {
 /// be empty, but values that are present must still be complete. The checks
 /// run in §13 order so `missing` reads as a checklist.
 pub fn assess(packet: &ActionPacket) -> Maturity {
+    assess_with(packet, FujinStrictness::default())
+}
+
+/// Like [`assess`], but with an explicit provenance gate strictness.
+///
+/// The only difference is how the three provenance fields
+/// (`required_documents`, `linked_knowledge`, `linked_rejected`) are
+/// checked: [`FujinStrictness::Soft`] keeps the current valid-or-empty
+/// semantics, [`FujinStrictness::Strict`] demands they be non-empty too.
+/// Every other §13 check is unchanged.
+pub fn assess_with(packet: &ActionPacket, strictness: FujinStrictness) -> Maturity {
     let mut missing = Vec::new();
 
     fn str_present(s: &str) -> bool {
@@ -50,6 +77,16 @@ pub fn assess(packet: &ActionPacket) -> Maturity {
     }
     fn structs_valid_or_empty<T>(items: &[T], all_ok: impl Fn(&T) -> bool) -> bool {
         items.is_empty() || items.iter().all(all_ok)
+    }
+    fn provenance_ok<T>(
+        items: &[T],
+        all_ok: impl Fn(&T) -> bool,
+        strictness: FujinStrictness,
+    ) -> bool {
+        match strictness {
+            FujinStrictness::Soft => structs_valid_or_empty(items, all_ok),
+            FujinStrictness::Strict => structs_present(items, all_ok),
+        }
     }
 
     if !str_present(&packet.goal) {
@@ -79,9 +116,11 @@ pub fn assess(packet: &ActionPacket) -> Maturity {
     if !list_present(&packet.dependencies) {
         missing.push("dependencies");
     }
-    if !structs_valid_or_empty(&packet.required_documents, |d| {
-        str_present(&d.title) && str_present(&d.uri)
-    }) {
+    if !provenance_ok(
+        &packet.required_documents,
+        |d| str_present(&d.title) && str_present(&d.uri),
+        strictness,
+    ) {
         missing.push("required_documents");
     }
     if !structs_present(&packet.linked_decisions, |i| {
@@ -89,14 +128,18 @@ pub fn assess(packet: &ActionPacket) -> Maturity {
     }) {
         missing.push("linked_decisions");
     }
-    if !structs_valid_or_empty(&packet.linked_knowledge, |i| {
-        str_present(&i.id) && str_present(&i.label)
-    }) {
+    if !provenance_ok(
+        &packet.linked_knowledge,
+        |i| str_present(&i.id) && str_present(&i.label),
+        strictness,
+    ) {
         missing.push("linked_knowledge");
     }
-    if !structs_valid_or_empty(&packet.linked_rejected, |i| {
-        str_present(&i.id) && str_present(&i.label)
-    }) {
+    if !provenance_ok(
+        &packet.linked_rejected,
+        |i| str_present(&i.id) && str_present(&i.label),
+        strictness,
+    ) {
         missing.push("linked_rejected");
     }
     if !list_present(&packet.expected_artifacts) {
@@ -364,5 +407,76 @@ mod tests {
                 }
             }
         }
+    }
+
+    // ── Strictness (provenance gate) ──────────────────────────────────────────
+
+    fn packet_without_provenance() -> ActionPacket {
+        let mut p = full_packet();
+        p.required_documents.clear();
+        p.linked_knowledge.clear();
+        p.linked_rejected.clear();
+        p
+    }
+
+    #[test]
+    fn strict_requires_non_empty_required_documents() {
+        let p = packet_without_provenance();
+        assert_eq!(
+            assess_with(&p, FujinStrictness::Strict),
+            Maturity::NotReady {
+                missing: vec![
+                    "required_documents".to_string(),
+                    "linked_knowledge".to_string(),
+                    "linked_rejected".to_string(),
+                ]
+            }
+        );
+    }
+
+    #[test]
+    fn strict_names_each_empty_provenance_field_individually() {
+        let mut p = full_packet();
+        p.linked_knowledge.clear();
+        assert_eq!(
+            assess_with(&p, FujinStrictness::Strict),
+            Maturity::NotReady {
+                missing: vec!["linked_knowledge".to_string()]
+            }
+        );
+
+        let mut p = full_packet();
+        p.linked_rejected.clear();
+        assert_eq!(
+            assess_with(&p, FujinStrictness::Strict),
+            Maturity::NotReady {
+                missing: vec!["linked_rejected".to_string()]
+            }
+        );
+
+        // A malformed provenance value is still reported under Strict.
+        let mut p = full_packet();
+        p.required_documents[0].uri = " ".into();
+        assert_eq!(
+            assess_with(&p, FujinStrictness::Strict),
+            Maturity::NotReady {
+                missing: vec!["required_documents".to_string()]
+            }
+        );
+    }
+
+    #[test]
+    fn soft_keeps_provenance_optional() {
+        assert_eq!(assess_with(&packet_without_provenance(), FujinStrictness::Soft), Maturity::Ready);
+    }
+
+    #[test]
+    fn assess_defaults_to_soft_strictness() {
+        assert_eq!(assess(&packet_without_provenance()), Maturity::Ready);
+    }
+
+    #[test]
+    fn strict_full_packet_is_ready() {
+        assert_eq!(assess_with(&full_packet(), FujinStrictness::Strict), Maturity::Ready);
     }
 }

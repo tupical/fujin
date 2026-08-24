@@ -11,11 +11,12 @@
 
 use crate::agent::{Actor, NewPlan, NewTask, ProjectId};
 use crate::error::ActionsError;
-use crate::maturity::assess;
+use crate::maturity::{assess_with, FujinStrictness};
 use crate::packet::{ActionPacket, HandoffPacket, HandoffProject};
 
 /// Build a [`HandoffPacket`] from a packet's projects, refusing if the
-/// packet is not yet mature (§16: "хотя бы один готовый action packet").
+/// packet is not yet mature under the default (soft) gate (§16: "хотя бы
+/// один готовый action packet").
 ///
 /// `projects` may be empty — that is the legitimate "одна идея может не
 /// породить проект" outcome (§16). Maturity is still required: even the
@@ -24,7 +25,21 @@ pub fn to_handoff(
     packet: &ActionPacket,
     projects: Vec<HandoffProject>,
 ) -> Result<HandoffPacket, ActionsError> {
-    match assess(packet) {
+    to_handoff_with(packet, projects, FujinStrictness::Soft)
+}
+
+/// Like [`to_handoff`], but with an explicit gate strictness.
+///
+/// Under [`FujinStrictness::Strict`] the maturity bar for the three
+/// provenance fields (`required_documents`, `linked_knowledge`,
+/// `linked_rejected`) is raised: they must be non-empty *and* valid — see
+/// [`crate::maturity::assess_with`]. Every other §13 check is unchanged.
+pub fn to_handoff_with(
+    packet: &ActionPacket,
+    projects: Vec<HandoffProject>,
+    strictness: FujinStrictness,
+) -> Result<HandoffPacket, ActionsError> {
+    match assess_with(packet, strictness) {
         m if m.is_ready() => Ok(HandoffPacket { projects }),
         crate::maturity::Maturity::NotReady { missing } => {
             Err(ActionsError::validation(format!(
@@ -114,6 +129,20 @@ mod tests {
         // §16: "одна идея может не породить проект".
         let h = to_handoff(&mature_packet(), vec![]).unwrap();
         assert!(h.projects.is_empty());
+    }
+
+    #[test]
+    fn strict_gate_refuses_empty_provenance_trio() {
+        let mut packet = mature_packet();
+        packet.required_documents.clear();
+        packet.linked_knowledge.clear();
+        packet.linked_rejected.clear();
+
+        // Soft (the to_handoff default) still accepts it.
+        assert!(to_handoff(&packet, vec![]).is_ok());
+
+        let err = to_handoff_with(&packet, vec![], FujinStrictness::Strict).unwrap_err();
+        assert!(matches!(err, ActionsError::Validation(_)));
     }
 
     #[test]

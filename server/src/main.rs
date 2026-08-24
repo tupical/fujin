@@ -12,7 +12,7 @@
 //! /v1/mcp is closed), FUJIN_VERSION, and the optional OPENAI_* fallback.
 
 use axum::http::StatusCode;
-use fujin::{ActionPacket, Maturity};
+use fujin::{ActionPacket, FujinStrictness, Maturity};
 use layer_kit::ai::extract_ai_config;
 use layer_kit::auth::Claims;
 use layer_kit::openai::{AiConfig, OpenAiProvider};
@@ -81,6 +81,12 @@ fn tools() -> Vec<serde_json::Value> {
             persisted under (e.g. `dec_1`), NOT `action_packet.id` (`ap_dec_1`); \
             if both are given, `action_packet` wins and `id` is ignored; with neither, \
             invalid_params is returned. \
+            Optional `strictness`: \"soft\" (default) allows the three provenance fields \
+            (`required_documents`, `linked_knowledge`, `linked_rejected`) to be empty as long \
+            as present values are valid; \"strict\" additionally requires them to be non-empty. \
+            Any other value is invalid_params. \
+            `strictness` is a top-level call parameter, NOT a key inside `action_packet` — \
+            a `strictness` key inside the packet body is ignored. \
             Output: {\"method\": \"fujin.assess\", \"ready\": bool, \"missing\": [field names]}. \
             A not-ready verdict is HTTP 200 with ready=false — assess is a query, not a gate \
             (unlike fujin_pack, which answers 422 not_ready); treat any non-2xx here as a \
@@ -91,7 +97,8 @@ fn tools() -> Vec<serde_json::Value> {
             "type": "object",
             "properties": {
                 "action_packet": {"type": "object"},
-                "id": {"type": "string"}
+                "id": {"type": "string"},
+                "strictness": {"type": "string", "enum": ["soft", "strict"]}
             },
             "anyOf": [{"required": ["action_packet"]}, {"required": ["id"]}]
         }
@@ -163,13 +170,16 @@ struct GetParams {
 /// Params for `fujin.assess`. `action_packet` stays raw JSON here: a
 /// partial packet is the main use case ("tell me what is missing"), so the
 /// body is overlaid onto a default packet before parsing — missing §13 keys
-/// are reported by `assess` itself, not by serde.
+/// are reported by `assess` itself, not by serde. `strictness` defaults to
+/// soft; an unknown variant fails serde with the allowed values listed.
 #[derive(serde::Deserialize)]
 struct AssessParams {
     #[serde(default)]
     action_packet: Option<serde_json::Value>,
     #[serde(default)]
     id: Option<String>,
+    #[serde(default)]
+    strictness: FujinStrictness,
 }
 
 /// Parse an assess request body into an [`ActionPacket`], tolerating a
@@ -350,7 +360,7 @@ async fn dispatch<P: fujin::AiProvider>(
                     json!({"error": "invalid_params", "detail": "pass `action_packet` (packet JSON) or `id` of a persisted packet"}),
                 ));
             };
-            let (ready, missing) = match fujin::assess(&packet) {
+            let (ready, missing) = match fujin::assess_with(&packet, p.strictness) {
                 Maturity::Ready => (true, Vec::new()),
                 Maturity::NotReady { missing } => (false, missing),
             };
@@ -872,6 +882,78 @@ mod tests {
         assert_eq!(out["method"], "fujin.assess");
         assert_eq!(out["ready"], true);
         assert_eq!(out["missing"], json!([]));
+    }
+
+    #[tokio::test]
+    async fn assess_strictness_defaults_to_soft_and_strict_raises_provenance_bar() {
+        // packet_args carries a fully-filled provenance trio; empty it out.
+        // Without `strictness` (soft) that stays ready; with "strict" the
+        // three provenance fields are named in `missing`.
+        let mut args = packet_args("Ship auth");
+        args["required_documents"] = json!([]);
+        args["linked_knowledge"] = json!([]);
+        args["linked_rejected"] = json!([]);
+
+        let soft = dispatch(
+            None::<&OpenAiProvider>,
+            false,
+            "fujin.assess",
+            json!({"action_packet": args}),
+        )
+        .await
+        .unwrap();
+        assert_eq!(soft["ready"], true);
+        assert_eq!(soft["missing"], json!([]));
+
+        let mut strict_params = json!({"action_packet": args});
+        strict_params["strictness"] = json!("strict");
+        let strict = dispatch(
+            None::<&OpenAiProvider>,
+            false,
+            "fujin.assess",
+            strict_params,
+        )
+        .await
+        .unwrap();
+        assert_eq!(strict["ready"], false);
+        assert_eq!(
+            strict["missing"],
+            json!(["required_documents", "linked_knowledge", "linked_rejected"])
+        );
+    }
+
+    #[tokio::test]
+    async fn assess_strict_accepts_fully_filled_packet() {
+        // packet_args already carries a non-empty provenance trio; under
+        // "strict" that must stay ready with nothing missing.
+        let out = dispatch(
+            None::<&OpenAiProvider>,
+            false,
+            "fujin.assess",
+            json!({"action_packet": packet_args("Ship auth"), "strictness": "strict"}),
+        )
+        .await
+        .unwrap();
+        assert_eq!(out["method"], "fujin.assess");
+        assert_eq!(out["ready"], true);
+        assert_eq!(out["missing"], json!([]));
+    }
+
+    #[tokio::test]
+    async fn assess_unknown_strictness_is_invalid_params() {
+        let (code, body) = dispatch(
+            None::<&OpenAiProvider>,
+            false,
+            "fujin.assess",
+            json!({"action_packet": packet_args("Ship auth"), "strictness": "pedantic"}),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(code, StatusCode::BAD_REQUEST);
+        assert_eq!(body["error"], "invalid_params");
+        // The serde detail names the allowed variants.
+        assert!(body["detail"].as_str().unwrap().contains("soft"));
+        assert!(body["detail"].as_str().unwrap().contains("strict"));
     }
 
     #[tokio::test]
