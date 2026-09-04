@@ -276,11 +276,15 @@ async fn dispatch<P: fujin::AiProvider>(
             let provider = ai.ok_or_else(ai_not_configured)?;
             let (packet, usage) = fujin::pack_ai(provider, &context, &p.source_ref)
                 .await
-                .map_err(|e| {
-                    (
+                .map_err(|error| match error {
+                    fujin::ActionsError::Validation(detail) => (
                         StatusCode::BAD_GATEWAY,
-                        json!({"error": "ai_error", "detail": e.to_string()}),
-                    )
+                        json!({"error": "invalid_ai_output", "detail": detail}),
+                    ),
+                    error => (
+                        StatusCode::BAD_GATEWAY,
+                        json!({"error": "ai_error", "detail": error.to_string()}),
+                    ),
                 })?;
             if let Maturity::NotReady { missing } = fujin::assess(&packet) {
                 return Err((
@@ -377,7 +381,9 @@ async fn dispatch<P: fujin::AiProvider>(
 mod tests {
     use super::*;
     use fujin::{AiError, AiOutput, AiRequest, AiUsage, ToolCall};
+    use std::collections::VecDeque;
     use std::sync::atomic::{AtomicU64, Ordering};
+    use std::sync::Mutex;
 
     static DB_SEQ: AtomicU64 = AtomicU64::new(1);
 
@@ -431,6 +437,47 @@ mod tests {
         }
     }
 
+    struct SequenceFake {
+        responses: Mutex<VecDeque<Result<Vec<AiOutput>, AiError>>>,
+        requests: Mutex<Vec<AiRequest>>,
+    }
+
+    impl SequenceFake {
+        fn new(responses: Vec<Result<Vec<AiOutput>, AiError>>) -> Self {
+            Self {
+                responses: Mutex::new(responses.into()),
+                requests: Mutex::new(Vec::new()),
+            }
+        }
+    }
+
+    impl fujin::AiProvider for SequenceFake {
+        async fn respond(&self, req: AiRequest) -> Result<Vec<AiOutput>, AiError> {
+            Ok(self.respond_with_usage(req).await?.0)
+        }
+
+        async fn respond_with_usage(
+            &self,
+            req: AiRequest,
+        ) -> Result<(Vec<AiOutput>, Option<AiUsage>), AiError> {
+            self.requests.lock().unwrap().push(req);
+            let outputs = self
+                .responses
+                .lock()
+                .unwrap()
+                .pop_front()
+                .expect("unexpected extra AI call")?;
+            Ok((
+                outputs,
+                Some(AiUsage {
+                    input_tokens: Some(10),
+                    output_tokens: Some(5),
+                    total_tokens: Some(15),
+                }),
+            ))
+        }
+    }
+
     fn packet_args(goal: &str) -> serde_json::Value {
         json!({
             "goal": goal,
@@ -450,6 +497,128 @@ mod tests {
             "before_start": [{"rule": "Read plan"}],
             "before_complete": [{"rule": "Run tests"}]
         })
+    }
+
+    fn packet_call(arguments: impl Into<String>) -> Result<Vec<AiOutput>, AiError> {
+        Ok(vec![AiOutput::ToolCall(ToolCall {
+            name: "build_action_packet".into(),
+            arguments: arguments.into(),
+        })])
+    }
+
+    #[tokio::test]
+    async fn pack_repairs_one_missing_field_without_rerunning_other_layers() {
+        let mut invalid = packet_args("ignored");
+        invalid.as_object_mut().unwrap().remove("goal");
+        let invalid = invalid.to_string();
+        let expected_error = serde_json::from_str::<ActionPacket>(&invalid)
+            .unwrap_err()
+            .to_string();
+        let fake = SequenceFake::new(vec![
+            packet_call(invalid.clone()),
+            packet_call(packet_args("Repaired goal").to_string()),
+        ]);
+
+        let (packet, usage) = fujin::pack_ai(&fake, &json!({}), "dec_repair")
+            .await
+            .unwrap();
+
+        assert_eq!(packet.goal, "Repaired goal");
+        assert_eq!(usage.unwrap().total_tokens, Some(30));
+        let requests = fake.requests.lock().unwrap();
+        assert_eq!(requests.len(), 2);
+        assert_eq!(requests[0].tools[0]["strict"], true);
+        let repair = requests[1].input.as_str().unwrap();
+        assert!(repair.contains(&expected_error));
+        assert!(repair.contains(&invalid));
+    }
+
+    #[tokio::test]
+    async fn pack_fails_closed_after_one_invalid_repair() {
+        let mut missing_goal = packet_args("ignored");
+        missing_goal["goal"] = json!("");
+        let mut missing_why = packet_args("ignored");
+        missing_why["why"] = json!("");
+        let fake = SequenceFake::new(vec![
+            packet_call(missing_goal.to_string()),
+            packet_call(missing_why.to_string()),
+        ]);
+
+        let error = fujin::pack_ai(&fake, &json!({}), "dec_repair")
+            .await
+            .unwrap_err()
+            .to_string();
+
+        assert!(error.starts_with("validation: pack_ai:"));
+        assert!(error.contains("initial: missing or blank fields: goal"));
+        assert!(error.contains("repair: missing or blank fields: why"));
+        assert_eq!(fake.requests.lock().unwrap().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn pack_repairs_required_document_without_title() {
+        let mut invalid = packet_args("Ship auth");
+        invalid["required_documents"] = json!([{"uri": "plan://1"}]);
+        let invalid = invalid.to_string();
+        let expected_error = serde_json::from_str::<ActionPacket>(&invalid)
+            .unwrap_err()
+            .to_string();
+        let fake = SequenceFake::new(vec![
+            packet_call(invalid),
+            packet_call(packet_args("Ship auth").to_string()),
+        ]);
+
+        fujin::pack_ai(&fake, &json!({}), "dec_repair")
+            .await
+            .unwrap();
+
+        assert!(fake.requests.lock().unwrap()[1]
+            .input
+            .as_str()
+            .unwrap()
+            .contains(&expected_error));
+    }
+
+    #[tokio::test]
+    async fn pack_repairs_eof_arguments_once() {
+        let invalid = "{";
+        let expected_error = serde_json::from_str::<ActionPacket>(invalid)
+            .unwrap_err()
+            .to_string();
+        let fake = SequenceFake::new(vec![
+            packet_call(invalid),
+            packet_call(packet_args("Ship auth").to_string()),
+        ]);
+
+        fujin::pack_ai(&fake, &json!({}), "dec_repair")
+            .await
+            .unwrap();
+
+        let requests = fake.requests.lock().unwrap();
+        assert_eq!(requests.len(), 2);
+        let repair = requests[1].input.as_str().unwrap();
+        assert!(repair.contains(&expected_error));
+        assert!(repair.contains("<untrusted_data>\n{"));
+    }
+
+    #[tokio::test]
+    async fn pack_retries_transport_classified_schema_error() {
+        let transport_error =
+            "invalid function call arguments JSON: EOF while parsing an object at line 1 column 2";
+        let fake = SequenceFake::new(vec![
+            Err(AiError::schema(transport_error)),
+            packet_call(packet_args("Ship auth").to_string()),
+        ]);
+
+        fujin::pack_ai(&fake, &json!({}), "dec_repair")
+            .await
+            .unwrap();
+
+        let requests = fake.requests.lock().unwrap();
+        assert_eq!(requests.len(), 2);
+        let repair = requests[1].input.as_str().unwrap();
+        assert!(repair.contains(transport_error));
+        assert!(repair.contains("transport rejected the malformed output"));
     }
 
     #[tokio::test]
@@ -696,7 +865,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn request_ai_rejects_immature_packet_with_missing() {
+    async fn request_ai_fails_closed_after_exhausted_repair() {
         let fake = Fake(Ok(vec![AiOutput::ToolCall(ToolCall {
             name: "build_action_packet".into(),
             arguments: packet_args("").to_string(),
@@ -711,14 +880,11 @@ mod tests {
         )
         .await
         .unwrap_err();
-        assert_eq!(code, StatusCode::UNPROCESSABLE_ENTITY);
-        assert_eq!(body["error"], "not_ready");
-        assert!(body["missing"].as_array().unwrap().contains(&json!("goal")));
-        // The 422 must also mean NOTHING was persisted: if store.put ever
-        // moved above the maturity gate, fujin.pack would still answer 422,
-        // but the immature packet would leak into the store and later leave
-        // via fujin.get as 200 — breaking the "immature packet never leaves
-        // as success" invariant through the read path.
+        assert_eq!(code, StatusCode::BAD_GATEWAY);
+        assert_eq!(body["error"], "invalid_ai_output");
+        assert!(body["detail"].as_str().unwrap().contains("initial: missing or blank fields: goal"));
+        assert!(body["detail"].as_str().unwrap().contains("repair: missing or blank fields: goal"));
+        // Exhausting the repair still means NOTHING was persisted.
         let stored: Option<serde_json::Value> =
             store.get("action_packet", "dec_abc").await.unwrap();
         assert!(stored.is_none(), "immature packet must not be persisted");
