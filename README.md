@@ -19,7 +19,8 @@ between deliberation and execution. Its `pack_ai` operation builds a typed
 documents, handoff projects/tasks), and its deterministic maturity check
 (`maturity::assess`, with strictness levels and minimality checks M2–M6/W1–W2)
 decides whether a packet is ripe for handoff — only a mature packet may cross
-into daruma as tasks/plans. Domain primitives stay storage-agnostic; the server
+into daruma as tasks/plans. Invalid model arguments get one schema-aware retry;
+a second invalid result fails closed. Domain primitives stay storage-agnostic; the server
 persists action packets. The crate has no dependency on daruma or sibling
 layers; concrete daruma adapters live inside the host.
 
