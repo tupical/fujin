@@ -507,6 +507,67 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn pack_writes_execution_bounds_and_preserves_explicit_brief() {
+        let envelope = json!({
+            "target_files": {"owned": ["src/auth.rs"], "read_only": ["Cargo.toml"], "forbidden": ["secrets/"]},
+            "conflict_policy": "Stop on conflicting edits",
+            "required_checks": ["cargo test auth"],
+            "reviewer_profile": "security"
+        });
+        let mut generated = packet_args("Ship auth");
+        generated
+            .as_object_mut()
+            .unwrap()
+            .extend(envelope.as_object().unwrap().clone());
+        let fake = SequenceFake::new(vec![packet_call(generated.to_string())]);
+        let (packet, _) = fujin::pack_ai(&fake, &json!({}), "decision").await.unwrap();
+        let packet = serde_json::to_value(packet).unwrap();
+        for (key, value) in envelope.as_object().unwrap() {
+            assert_eq!(&packet[key], value);
+            let requests = fake.requests.lock().unwrap();
+            let schema = &requests[0].tools[0]["parameters"];
+            assert!(schema["properties"].get(key).is_some());
+            assert!(schema["required"].as_array().unwrap().contains(&json!(key)));
+        }
+        let brief = fujin::packet_from_brief(&envelope);
+        assert_eq!(
+            serde_json::to_value(brief).unwrap()["target_files"],
+            envelope["target_files"]
+        );
+
+        let fake = Fake(packet_call(generated.to_string()));
+        let explicit = json!({"target_files": {"owned": [], "read_only": [], "forbidden": ["src/"]}, "required_checks": ["audit"], "conflict_policy": "Stop", "reviewer_profile": null});
+        let out = dispatch(
+            Some(&fake),
+            false,
+            "fujin.pack",
+            json!({"source_ref": "decision", "plan_brief": explicit}),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            out["action_packet"]["target_files"],
+            explicit["target_files"]
+        );
+        assert_eq!(
+            out["action_packet"]["required_checks"],
+            explicit["required_checks"]
+        );
+        assert_eq!(out["action_packet"]["conflict_policy"], "Stop");
+        assert!(out["action_packet"].get("reviewer_profile").is_none());
+        let (code, body) = dispatch(
+            Some(&fake),
+            false,
+            "fujin.pack",
+            json!({"source_ref": "decision", "plan_brief": {"target_files": "invalid"}}),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(code, StatusCode::BAD_GATEWAY);
+        assert_eq!(body["error"], "invalid_ai_output");
+    }
+
+    #[tokio::test]
     async fn pack_repairs_one_missing_field_without_rerunning_other_layers() {
         let mut invalid = packet_args("ignored");
         invalid.as_object_mut().unwrap().remove("goal");

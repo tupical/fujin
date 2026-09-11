@@ -19,7 +19,6 @@ pub mod ai;
 pub mod error;
 pub mod handoff;
 pub mod maturity;
-pub mod minimality;
 pub mod pack;
 pub mod packet;
 
@@ -28,13 +27,6 @@ pub use ai::{AiError, AiOutput, AiProvider, AiRequest, AiUsage, ToolCall};
 pub use error::ActionsError;
 pub use handoff::{into_new_plan, to_handoff, to_handoff_with, NewPlanWithTasks};
 pub use maturity::{assess, assess_with, FujinStrictness, Maturity};
-pub use minimality::{
-    check_minimality, CodeActionMinimality, DebtMarker, DependencyJustification, EvidenceCheck,
-    MinimalityCheck, MinimalityPolicy, MinimalityVerdict, ProtectedRequirements,
-    M2_NO_MINIMALITY_CHECK, M3_NEW_DEP_UNJUSTIFIED, M4_PROTECTED_REQUIREMENT_CUT,
-    M5_NONTRIVIAL_NO_EVIDENCE, M6_DEBT_MARKER_NO_CEILING, W1_DEBT_MARKER_NO_UPGRADE_TRIGGER,
-    W2_NEED_NOT_ESTABLISHED,
-};
 pub use pack::pack_ai;
 pub use packet::{
     ActionPacket, ExecutionStep, Gate, HandoffPacket, HandoffProject, LinkedItem, RequiredDocument,
@@ -76,6 +68,14 @@ pub fn packet_from_brief(brief: &serde_json::Value) -> ActionPacket {
         linked_decisions: linked(strings(brief, "decisions_made")),
         linked_knowledge: linked(strings(brief, "knowledge_base")),
         linked_rejected: linked(strings(brief, "rejected_alternatives")),
+        target_files: TargetFiles {
+            owned: strings(&brief["target_files"], "owned"),
+            read_only: strings(&brief["target_files"], "read_only"),
+            forbidden: strings(&brief["target_files"], "forbidden"),
+        },
+        conflict_policy: brief["conflict_policy"].as_str().map(str::to_owned),
+        required_checks: strings(brief, "required_checks"),
+        reviewer_profile: brief["reviewer_profile"].as_str().map(str::to_owned),
         ..ActionPacket::default()
     }
 }

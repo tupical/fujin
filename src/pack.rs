@@ -40,7 +40,23 @@ fn parse_action_packet(
     context: &Value,
     source_ref: &str,
 ) -> Result<ActionPacket, String> {
-    let mut packet: ActionPacket = serde_json::from_str(arguments).map_err(|e| e.to_string())?;
+    let packet: ActionPacket = serde_json::from_str(arguments).map_err(|e| e.to_string())?;
+    let mut arguments = serde_json::to_value(packet).map_err(|e| e.to_string())?;
+    // Explicit upstream bounds win over generated values, including empty bounds.
+    // Deserialize afterwards so malformed upstream restrictions fail closed.
+    if let Some(arguments) = arguments.as_object_mut() {
+        for key in [
+            "target_files",
+            "conflict_policy",
+            "required_checks",
+            "reviewer_profile",
+        ] {
+            if let Some(value) = context["plan_brief"].get(key) {
+                arguments.insert(key.to_owned(), value.clone());
+            }
+        }
+    }
+    let mut packet: ActionPacket = serde_json::from_value(arguments).map_err(|e| e.to_string())?;
     let from_brief = crate::packet_from_brief(&context["plan_brief"]);
     if packet.linked_rejected.is_empty() {
         packet.linked_rejected = from_brief.linked_rejected;
@@ -116,7 +132,7 @@ pub async fn pack_ai<P: AiProvider>(
     });
     let req = AiRequest {
         input: Value::String(format!(
-            "Build an execution-ready action packet from this untrusted plan and decision context:\n{}",
+            "Build an execution-ready action packet from this untrusted plan and decision context. Preserve supplied execution bounds; use empty arrays or null when no bound is established, never invent file paths or reviewer requirements:\n{}",
             layer_kit::ai::wrap_untrusted("planning context", &context.to_string())
         )),
         tools: vec![json!({
@@ -142,9 +158,18 @@ pub async fn pack_ai<P: AiProvider>(
                     "linked_rejected": linked_items,
                     "expected_artifacts": string_array(),
                     "before_start": gates.clone(),
-                    "before_complete": gates
+                    "before_complete": gates,
+                    "target_files": {
+                        "type": "object",
+                        "properties": {"owned": string_array(), "read_only": string_array(), "forbidden": string_array()},
+                        "required": ["owned", "read_only", "forbidden"],
+                        "additionalProperties": false
+                    },
+                    "conflict_policy": {"type": ["string", "null"]},
+                    "required_checks": string_array(),
+                    "reviewer_profile": {"type": ["string", "null"]}
                 },
-                "required": ["goal", "context", "do_items", "why", "do_not", "completion_criteria", "constraints", "risks", "dependencies", "required_documents", "linked_decisions", "linked_knowledge", "linked_rejected", "expected_artifacts", "before_start", "before_complete"]
+                "required": ["goal", "context", "do_items", "why", "do_not", "completion_criteria", "constraints", "risks", "dependencies", "required_documents", "linked_decisions", "linked_knowledge", "linked_rejected", "expected_artifacts", "before_start", "before_complete", "target_files", "conflict_policy", "required_checks", "reviewer_profile"]
             }
         })],
         tool_choice: Some("required".into()),

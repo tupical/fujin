@@ -17,17 +17,24 @@ Fujin is the **actions** layer of the Meisei pipeline: the maturity boundary
 between deliberation and execution. Its `pack_ai` operation builds a typed
 `ActionPacket` (work order, execution steps, gates, target files, required
 documents, handoff projects/tasks), and its deterministic maturity check
-(`maturity::assess`, with strictness levels and minimality checks M2–M6/W1–W2)
+(`maturity::assess`, with strictness levels)
 decides whether a packet is ripe for handoff — only a mature packet may cross
 into daruma as tasks/plans. Invalid model arguments get one schema-aware retry;
 a second invalid result fails closed. Domain primitives stay storage-agnostic; the server
 persists action packets. The crate has no dependency on daruma or sibling
 layers; concrete daruma adapters live inside the host.
 
+`pack_ai` writes the optional execution envelope (`target_files`,
+`conflict_policy`, `required_checks`, `reviewer_profile`). Explicit PlanBrief
+bounds take precedence over model output and malformed bounds fail validation.
+Unspecified bounds remain empty; these declarations do not enforce filesystem
+access. The unused standalone minimality validator has been removed: maturity
+does not claim to verify implementation simplicity or test results.
+
 ## Repository layout
 
 - `src/` — the `fujin` library: `ActionPacket`/handoff types, `pack_ai`,
-  deterministic maturity assessment, minimality policy, error types.
+  deterministic maturity assessment and error types.
 - `server/` — `fujin-server`, a thin, independently-deployed HTTP/MCP wrapper over
   the library (the axum/tokio scaffold comes from [`layer-kit`](../layer-kit)).
 - `deploy/` — release `build.sh` (stamps the git SHA into `/healthz`) and a
