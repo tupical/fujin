@@ -82,12 +82,37 @@ fn parse_action_packet(
         id: source_ref.to_owned(),
         label: source_ref.to_owned(),
     }];
+    drop_incomplete_provenance(&mut packet);
 
     match crate::assess(&packet) {
         crate::Maturity::Ready => Ok(packet),
         crate::Maturity::NotReady { missing } => {
             Err(format!("missing or blank fields: {}", missing.join(", ")))
         }
+    }
+}
+
+/// Drop provenance entries the model could not address.
+///
+/// The §13 provenance trio (`required_documents`, `linked_knowledge`,
+/// `linked_rejected`) is *valid-or-empty* under
+/// [`FujinStrictness::Soft`](crate::FujinStrictness::Soft): an empty list
+/// means "no provenance established", while a half-filled entry is a
+/// contract violation. Models routinely name a document they read about in
+/// the planning context but have no address for, emitting `{title: "...",
+/// uri: ""}`. That is not meaning the model failed to produce — it is
+/// meaning that does not exist in the input, so the honest packet omits the
+/// entry rather than inventing a URI (which `repair_request` forbids).
+///
+/// Dropping here keeps the gate's contract intact: under `Strict` the now
+/// empty list still fails, correctly reporting that provenance is missing
+/// instead of accepting a blank address.
+fn drop_incomplete_provenance(packet: &mut ActionPacket) {
+    packet
+        .required_documents
+        .retain(|doc| !doc.title.trim().is_empty() && !doc.uri.trim().is_empty());
+    for links in [&mut packet.linked_knowledge, &mut packet.linked_rejected] {
+        links.retain(|item| !item.id.trim().is_empty() && !item.label.trim().is_empty());
     }
 }
 
@@ -229,4 +254,77 @@ pub async fn pack_ai<P: AiProvider>(
     }
 
     unreachable!("bounded repair loop always returns")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn context() -> Value {
+        json!({"plan_brief": {}, "sensing_item": {}})
+    }
+
+    fn arguments(required_documents: Value) -> String {
+        json!({
+            "goal": "Ship the fix",
+            "context": "pipeline run",
+            "do_items": ["implement"],
+            "why": "the gate rejects half-filled provenance",
+            "do_not": ["do not invent a uri"],
+            "completion_criteria": ["tests green"],
+            "constraints": ["no new entities"],
+            "risks": ["drift"],
+            "dependencies": ["fujin"],
+            "required_documents": required_documents,
+            "linked_decisions": [],
+            "linked_knowledge": [],
+            "linked_rejected": [],
+            "expected_artifacts": ["packet"],
+            "before_start": [{"rule": "read the brief"}],
+            "before_complete": [{"rule": "tests pass"}],
+        })
+        .to_string()
+    }
+
+    /// A model that names a document it has no address for must not block
+    /// the run: the unaddressable entry is dropped, not invented.
+    #[test]
+    fn blank_uri_documents_are_dropped_instead_of_failing_the_gate() {
+        let packet = parse_action_packet(
+            &arguments(json!([{"title": "docs/guides/research-lineage.md", "uri": ""}])),
+            &context(),
+            "dec-1",
+        )
+        .expect("packet with an unaddressable document still matures");
+        assert!(packet.required_documents.is_empty());
+    }
+
+    /// Dropping is surgical: addressable documents survive alongside the
+    /// blank ones that are removed.
+    #[test]
+    fn addressable_documents_survive_the_drop() {
+        let packet = parse_action_packet(
+            &arguments(json!([
+                {"title": "manifest", "uri": "docs/manifest.md"},
+                {"title": "unaddressable", "uri": "   "},
+            ])),
+            &context(),
+            "dec-1",
+        )
+        .expect("packet matures");
+        assert_eq!(packet.required_documents.len(), 1);
+        assert_eq!(packet.required_documents[0].uri, "docs/manifest.md");
+    }
+
+    /// The drop never rescues a genuinely missing required field — only the
+    /// valid-or-empty provenance trio is affected.
+    #[test]
+    fn required_fields_still_fail_the_gate() {
+        let mut args: Value = serde_json::from_str(&arguments(json!([]))).unwrap();
+        args["do_items"] = json!([]);
+        let error = parse_action_packet(&args.to_string(), &context(), "dec-1")
+            .expect_err("an empty required list is still missing");
+        assert!(error.contains("do_items"), "unexpected error: {error}");
+    }
 }
