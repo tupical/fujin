@@ -39,6 +39,7 @@ fn parse_action_packet(
     arguments: &str,
     context: &Value,
     source_ref: &str,
+    last_chance: bool,
 ) -> Result<ActionPacket, String> {
     let packet: ActionPacket = serde_json::from_str(arguments).map_err(|e| e.to_string())?;
     let mut arguments = serde_json::to_value(packet).map_err(|e| e.to_string())?;
@@ -57,6 +58,12 @@ fn parse_action_packet(
         }
     }
     let mut packet: ActionPacket = serde_json::from_value(arguments).map_err(|e| e.to_string())?;
+    // Before the upstream fallbacks below: an unaddressable entry must not
+    // count as "the model supplied provenance" and suppress a real value the
+    // brief already carries.
+    if last_chance {
+        drop_incomplete_provenance(&mut packet);
+    }
     let from_brief = crate::packet_from_brief(&context["plan_brief"]);
     if packet.linked_rejected.is_empty() {
         packet.linked_rejected = from_brief.linked_rejected;
@@ -82,7 +89,6 @@ fn parse_action_packet(
         id: source_ref.to_owned(),
         label: source_ref.to_owned(),
     }];
-    drop_incomplete_provenance(&mut packet);
 
     match crate::assess(&packet) {
         crate::Maturity::Ready => Ok(packet),
@@ -92,7 +98,7 @@ fn parse_action_packet(
     }
 }
 
-/// Drop provenance entries the model could not address.
+/// Drop provenance entries the model could not address — last resort only.
 ///
 /// The §13 provenance trio (`required_documents`, `linked_knowledge`,
 /// `linked_rejected`) is *valid-or-empty* under
@@ -100,13 +106,15 @@ fn parse_action_packet(
 /// means "no provenance established", while a half-filled entry is a
 /// contract violation. Models routinely name a document they read about in
 /// the planning context but have no address for, emitting `{title: "...",
-/// uri: ""}`. That is not meaning the model failed to produce — it is
-/// meaning that does not exist in the input, so the honest packet omits the
-/// entry rather than inventing a URI (which `repair_request` forbids).
+/// uri: ""}`. The gate rejects that entry and `repair_request` forbids
+/// inventing the missing URI, so the run had no exit at all.
 ///
-/// Dropping here keeps the gate's contract intact: under `Strict` the now
-/// empty list still fails, correctly reporting that provenance is missing
-/// instead of accepting a blank address.
+/// This runs **only on the final attempt**, after repair has already been
+/// asked to complete the entry: when the address does exist upstream the
+/// model gets its chance to supply it, and only an entry still unaddressed
+/// at the end is dropped. Dropping keeps the gate's contract intact — under
+/// `Strict` the now empty list still fails, correctly reporting that
+/// provenance is missing instead of accepting a blank address.
 fn drop_incomplete_provenance(packet: &mut ActionPacket) {
     packet
         .required_documents
@@ -238,7 +246,7 @@ pub async fn pack_ai<P: AiProvider>(
             }
             Err(error) => return Err(ActionsError::ai(format!("pack_ai: {error}"))),
         };
-        match parse_action_packet(&arguments, context, source_ref) {
+        match parse_action_packet(&arguments, context, source_ref, attempt == 1) {
             Ok(packet) => return Ok((packet, usage)),
             Err(error) if attempt == 0 => {
                 first_error = Some(error.clone());
@@ -287,14 +295,33 @@ mod tests {
         .to_string()
     }
 
-    /// A model that names a document it has no address for must not block
-    /// the run: the unaddressable entry is dropped, not invented.
+    /// The first attempt must still fail so `repair_request` gets its chance
+    /// to ask for the missing address — dropping is a last resort, not the
+    /// first answer.
     #[test]
-    fn blank_uri_documents_are_dropped_instead_of_failing_the_gate() {
+    fn first_attempt_still_reports_the_blank_uri() {
+        let error = parse_action_packet(
+            &arguments(json!([{"title": "docs/guides/research-lineage.md", "uri": ""}])),
+            &context(),
+            "dec-1",
+            false,
+        )
+        .expect_err("repair must be attempted before anything is dropped");
+        assert!(
+            error.contains("required_documents"),
+            "unexpected error: {error}"
+        );
+    }
+
+    /// A document the model could not address even after repair must not
+    /// deadlock the run: the unaddressable entry is dropped, not invented.
+    #[test]
+    fn blank_uri_documents_are_dropped_on_the_last_attempt() {
         let packet = parse_action_packet(
             &arguments(json!([{"title": "docs/guides/research-lineage.md", "uri": ""}])),
             &context(),
             "dec-1",
+            true,
         )
         .expect("packet with an unaddressable document still matures");
         assert!(packet.required_documents.is_empty());
@@ -311,10 +338,29 @@ mod tests {
             ])),
             &context(),
             "dec-1",
+            true,
         )
         .expect("packet matures");
         assert_eq!(packet.required_documents.len(), 1);
         assert_eq!(packet.required_documents[0].uri, "docs/manifest.md");
+    }
+
+    /// An address the brief already carries must survive a malformed model
+    /// link: dropping runs before the upstream fallbacks, so a blank entry
+    /// cannot suppress real provenance.
+    #[test]
+    fn upstream_provenance_survives_a_malformed_model_link() {
+        let mut args: Value = serde_json::from_str(&arguments(json!([]))).unwrap();
+        args["linked_knowledge"] = json!([{"id": "", "label": ""}]);
+        args["linked_rejected"] = json!([{"id": "", "label": ""}]);
+        let context = json!({
+            "plan_brief": {"knowledge_base": ["kn-1"], "rejected_alternatives": ["rej-1"]},
+            "sensing_item": {},
+        });
+        let packet = parse_action_packet(&args.to_string(), &context, "dec-1", true)
+            .expect("packet matures");
+        assert_eq!(packet.linked_knowledge[0].id, "kn-1");
+        assert_eq!(packet.linked_rejected[0].id, "rej-1");
     }
 
     /// The drop never rescues a genuinely missing required field — only the
@@ -323,7 +369,7 @@ mod tests {
     fn required_fields_still_fail_the_gate() {
         let mut args: Value = serde_json::from_str(&arguments(json!([]))).unwrap();
         args["do_items"] = json!([]);
-        let error = parse_action_packet(&args.to_string(), &context(), "dec-1")
+        let error = parse_action_packet(&args.to_string(), &context(), "dec-1", true)
             .expect_err("an empty required list is still missing");
         assert!(error.contains("do_items"), "unexpected error: {error}");
     }
