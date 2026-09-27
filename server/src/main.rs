@@ -31,14 +31,18 @@ struct Handler {
 impl McpHandler for Handler {
     async fn dispatch(
         &self,
-        _claims: &Claims,
+        claims: &Claims,
         method: &str,
         mut params: serde_json::Value,
     ) -> Result<serde_json::Value, (StatusCode, serde_json::Value)> {
+        // One store serves every tenant: confine this call to the token's scope.
+        let store = &self
+            .store
+            .scoped(&claims.workspace, claims.project.as_deref());
         if let Some(cfg) = extract_ai_config(&mut params) {
             let provider = OpenAiProvider::new(cfg);
             dispatch(
-                &self.store,
+                store,
                 Some(&provider),
                 Some(provider.model()),
                 method,
@@ -47,7 +51,7 @@ impl McpHandler for Handler {
             .await
         } else {
             let model = self.ai.as_ref().map(|provider| provider.model());
-            dispatch(&self.store, self.ai.as_ref(), model, method, params).await
+            dispatch(store, self.ai.as_ref(), model, method, params).await
         }
     }
 
@@ -1208,5 +1212,45 @@ mod tests {
         .unwrap_err();
         assert_eq!(code, StatusCode::BAD_REQUEST);
         assert_eq!(body["error"], "invalid_params");
+    }
+
+    /// daruma 01a0d3bc: one layer server serves every tenant — the platform
+    /// token's workspace confines every read, so ws B never sees ws A's objects.
+    #[tokio::test]
+    async fn token_of_one_workspace_never_sees_another() {
+        let claims = |ws: &str| Claims {
+            workspace: ws.into(),
+            project: None,
+            tool: TOOL.into(),
+            exp: i64::MAX,
+        };
+        let store = test_store().await;
+        let packet: ActionPacket = serde_json::from_value(packet_args("secret of A")).unwrap();
+        store
+            .scoped("ws_a", None)
+            .put("action_packet", "pkt_a", &packet)
+            .await
+            .unwrap();
+        let handler = Handler { ai: None, store };
+        let b = handler
+            .dispatch(&claims("ws_b"), "fujin.list", json!({}))
+            .await
+            .unwrap();
+        assert_eq!(b["action_packets"], json!([]));
+        for (method, args) in [
+            ("fujin.get", json!({"id": "pkt_a"})),
+            ("fujin.assess", json!({"id": "pkt_a"})),
+        ] {
+            let (code, _) = handler
+                .dispatch(&claims("ws_b"), method, args)
+                .await
+                .unwrap_err();
+            assert_eq!(code, StatusCode::NOT_FOUND, "{method}");
+        }
+        let a = handler
+            .dispatch(&claims("ws_a"), "fujin.list", json!({}))
+            .await
+            .unwrap();
+        assert_eq!(a["action_packets"][0]["goal"], "secret of A");
     }
 }
