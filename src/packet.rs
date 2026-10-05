@@ -179,7 +179,7 @@ pub struct HandoffProject {
     /// Provenance carried over from the Action Packet's §13 `linked_*`
     /// fields (manifest §6, "родословная задач"), scoped to this project.
     /// Not part of the maturity contract — the packet is already required
-    /// to be mature before `to_handoff` runs — but dropping it here would
+    /// to be mature before handoff — but dropping it here would
     /// sever lineage at the actions→execution boundary, which is the whole
     /// point of carrying it this far.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
