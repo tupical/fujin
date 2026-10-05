@@ -14,18 +14,14 @@
 //! - Errors propagate as [`error::ActionsError`].
 //!
 
-pub mod agent;
 pub mod ai;
 pub mod error;
-pub mod handoff;
 pub mod maturity;
 pub mod pack;
 pub mod packet;
 
-pub use agent::{Actor, ActorKind, NewPlan, NewTask, ProjectId};
 pub use ai::{AiError, AiOutput, AiProvider, AiRequest, AiUsage, ToolCall};
 pub use error::ActionsError;
-pub use handoff::{into_new_plan, to_handoff, to_handoff_with, NewPlanWithTasks};
 pub use maturity::{assess, assess_with, FujinStrictness, Maturity};
 pub use pack::pack_ai;
 pub use packet::{
