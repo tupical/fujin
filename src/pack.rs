@@ -35,17 +35,34 @@ fn action_packet_arguments(outputs: Vec<AiOutput>) -> Result<String, String> {
         .ok_or_else(|| "model returned no build_action_packet call".into())
 }
 
+/// Why one attempt to turn the model output into a packet failed.
+enum Parse {
+    /// Fixable by asking the model again (the message is fed to repair).
+    Invalid(String),
+    /// Only a human can supply what is missing — repair cannot help.
+    NeedsInput(Vec<String>),
+}
+
 fn parse_action_packet(
     arguments: &str,
     context: &Value,
     source_ref: &str,
     last_chance: bool,
-) -> Result<ActionPacket, String> {
-    let packet: ActionPacket = serde_json::from_str(arguments).map_err(|e| e.to_string())?;
-    let mut arguments = serde_json::to_value(packet).map_err(|e| e.to_string())?;
+) -> Result<ActionPacket, Parse> {
+    let invalid = |e: serde_json::Error| Parse::Invalid(e.to_string());
+    let mut arguments: Value = serde_json::from_str(arguments).map_err(invalid)?;
+    // Provenance is host-filled (below) and not required of the model.
     // Explicit upstream bounds win over generated values, including empty bounds.
     // Deserialize afterwards so malformed upstream restrictions fail closed.
     if let Some(arguments) = arguments.as_object_mut() {
+        for key in [
+            "required_documents",
+            "linked_decisions",
+            "linked_knowledge",
+            "linked_rejected",
+        ] {
+            arguments.entry(key).or_insert_with(|| json!([]));
+        }
         for key in [
             "target_files",
             "conflict_policy",
@@ -57,12 +74,12 @@ fn parse_action_packet(
             }
         }
     }
-    let mut packet: ActionPacket = serde_json::from_value(arguments).map_err(|e| e.to_string())?;
+    let mut packet: ActionPacket = serde_json::from_value(arguments).map_err(invalid)?;
     // Before the upstream fallbacks below: an unaddressable entry must not
     // count as "the model supplied provenance" and suppress a real value the
     // brief already carries.
     if last_chance {
-        drop_incomplete_provenance(&mut packet);
+        ask_for_missing_addresses(&mut packet)?;
     }
     let from_brief = crate::packet_from_brief(&context["plan_brief"]);
     if packet.linked_rejected.is_empty() {
@@ -92,36 +109,43 @@ fn parse_action_packet(
 
     match crate::assess(&packet) {
         crate::Maturity::Ready => Ok(packet),
-        crate::Maturity::NotReady { missing } => {
-            Err(format!("missing or blank fields: {}", missing.join(", ")))
-        }
+        crate::Maturity::NotReady { missing } => Err(Parse::Invalid(format!(
+            "missing or blank fields: {}",
+            missing.join(", ")
+        ))),
     }
 }
 
-/// Drop provenance entries the model could not address — last resort only.
+/// Last-attempt provenance check: a document the model named but could not
+/// address becomes a question for the human instead of being invented or
+/// silently dropped.
 ///
-/// The §13 provenance trio (`required_documents`, `linked_knowledge`,
-/// `linked_rejected`) is *valid-or-empty* under
+/// The §13 provenance trio is *valid-or-empty* under
 /// [`FujinStrictness::Soft`](crate::FujinStrictness::Soft): an empty list
-/// means "no provenance established", while a half-filled entry is a
-/// contract violation. Models routinely name a document they read about in
-/// the planning context but have no address for, emitting `{title: "...",
-/// uri: ""}`. The gate rejects that entry and `repair_request` forbids
-/// inventing the missing URI, so the run had no exit at all.
-///
-/// This runs **only on the final attempt**, after repair has already been
-/// asked to complete the entry: when the address does exist upstream the
-/// model gets its chance to supply it, and only an entry still unaddressed
-/// at the end is dropped. Dropping keeps the gate's contract intact — under
-/// `Strict` the now empty list still fails, correctly reporting that
-/// provenance is missing instead of accepting a blank address.
-fn drop_incomplete_provenance(packet: &mut ActionPacket) {
+/// means "no provenance established", a half-filled entry is a contract
+/// violation. Models name documents they read about in the planning context
+/// but have no address for (`{title: "...", uri: ""}`), and `repair_request`
+/// forbids inventing the URI. This runs only on the final attempt, after
+/// repair had its chance to find the address upstream. Entries blank in both
+/// fields are noise and dropped; blank `linked_*` entries are dropped so the
+/// brief fallbacks can fill them.
+fn ask_for_missing_addresses(packet: &mut ActionPacket) -> Result<(), Parse> {
     packet
         .required_documents
-        .retain(|doc| !doc.title.trim().is_empty() && !doc.uri.trim().is_empty());
+        .retain(|doc| !(doc.title.trim().is_empty() && doc.uri.trim().is_empty()));
+    let questions: Vec<String> = packet
+        .required_documents
+        .iter()
+        .filter(|doc| doc.uri.trim().is_empty())
+        .map(|doc| format!("Укажите адрес документа «{}»", doc.title.trim()))
+        .collect();
+    if !questions.is_empty() {
+        return Err(Parse::NeedsInput(questions));
+    }
     for links in [&mut packet.linked_knowledge, &mut packet.linked_rejected] {
         links.retain(|item| !item.id.trim().is_empty() && !item.label.trim().is_empty());
     }
+    Ok(())
 }
 
 fn repair_request(
@@ -147,14 +171,6 @@ pub async fn pack_ai<P: AiProvider>(
     context: &Value,
     source_ref: &str,
 ) -> Result<(ActionPacket, Option<AiUsage>), ActionsError> {
-    let linked_items = json!({
-        "type": "array",
-        "items": {
-            "type": "object",
-            "properties": {"id": {"type": "string"}, "label": {"type": "string"}},
-            "required": ["id", "label"]
-        }
-    });
     let gates = json!({
         "type": "array",
         "items": {
@@ -185,10 +201,7 @@ pub async fn pack_ai<P: AiProvider>(
                     "constraints": string_array(),
                     "risks": string_array(),
                     "dependencies": string_array(),
-                    "required_documents": {"type": "array", "items": {"type": "object", "properties": {"title": {"type": "string"}, "uri": {"type": "string"}}, "required": ["title", "uri"]}},
-                    "linked_decisions": linked_items.clone(),
-                    "linked_knowledge": linked_items.clone(),
-                    "linked_rejected": linked_items,
+                    "required_documents": {"type": "array", "description": "Only documents named in the context WITH a known address; empty array otherwise. Never invent a uri.", "items": {"type": "object", "properties": {"title": {"type": "string"}, "uri": {"type": "string"}}, "required": ["title", "uri"]}},
                     "expected_artifacts": string_array(),
                     "before_start": gates.clone(),
                     "before_complete": gates,
@@ -202,7 +215,7 @@ pub async fn pack_ai<P: AiProvider>(
                     "required_checks": string_array(),
                     "reviewer_profile": {"type": ["string", "null"]}
                 },
-                "required": ["goal", "context", "do_items", "why", "do_not", "completion_criteria", "constraints", "risks", "dependencies", "required_documents", "linked_decisions", "linked_knowledge", "linked_rejected", "expected_artifacts", "before_start", "before_complete", "target_files", "conflict_policy", "required_checks", "reviewer_profile"]
+                "required": ["goal", "context", "do_items", "why", "do_not", "completion_criteria", "constraints", "risks", "dependencies", "required_documents", "expected_artifacts", "before_start", "before_complete", "target_files", "conflict_policy", "required_checks", "reviewer_profile"]
             }
         })],
         tool_choice: Some("required".into()),
@@ -248,11 +261,12 @@ pub async fn pack_ai<P: AiProvider>(
         };
         match parse_action_packet(&arguments, context, source_ref, attempt == 1) {
             Ok(packet) => return Ok((packet, usage)),
-            Err(error) if attempt == 0 => {
+            Err(Parse::NeedsInput(questions)) => return Err(ActionsError::NeedsInput(questions)),
+            Err(Parse::Invalid(error)) if attempt == 0 => {
                 first_error = Some(error.clone());
                 request = repair_request(request, &error, Some(&arguments));
             }
-            Err(error) => {
+            Err(Parse::Invalid(error)) => {
                 return Err(ActionsError::validation(format!(
                     "pack_ai: build_action_packet remained invalid after one repair; initial: {}; repair: {error}",
                     first_error.as_deref().unwrap_or("unknown validation error")
@@ -295,54 +309,82 @@ mod tests {
         .to_string()
     }
 
+    fn invalid(result: Result<ActionPacket, Parse>) -> String {
+        match result.expect_err("expected a failure") {
+            Parse::Invalid(error) => error,
+            Parse::NeedsInput(q) => panic!("unexpected needs_input: {q:?}"),
+        }
+    }
+
     /// The first attempt must still fail so `repair_request` gets its chance
-    /// to ask for the missing address — dropping is a last resort, not the
-    /// first answer.
+    /// to ask for the missing address — asking the human is the last resort.
     #[test]
     fn first_attempt_still_reports_the_blank_uri() {
-        let error = parse_action_packet(
+        let error = invalid(parse_action_packet(
             &arguments(json!([{"title": "docs/guides/research-lineage.md", "uri": ""}])),
             &context(),
             "dec-1",
             false,
-        )
-        .expect_err("repair must be attempted before anything is dropped");
-        assert!(
-            error.contains("required_documents"),
-            "unexpected error: {error}"
-        );
+        ));
+        assert!(error.contains("required_documents"), "unexpected: {error}");
     }
 
-    /// A document the model could not address even after repair must not
-    /// deadlock the run: the unaddressable entry is dropped, not invented.
+    /// A document the model could not address even after repair becomes a
+    /// question for the human: nothing is invented and nothing is dropped.
     #[test]
-    fn blank_uri_documents_are_dropped_on_the_last_attempt() {
-        let packet = parse_action_packet(
-            &arguments(json!([{"title": "docs/guides/research-lineage.md", "uri": ""}])),
+    fn blank_uri_document_becomes_a_question_on_the_last_attempt() {
+        let Err(Parse::NeedsInput(questions)) = parse_action_packet(
+            &arguments(json!([
+                {"title": "manifest", "uri": "docs/manifest.md"},
+                {"title": "docs/guides/research-lineage.md", "uri": "  "},
+            ])),
             &context(),
             "dec-1",
             true,
-        )
-        .expect("packet with an unaddressable document still matures");
-        assert!(packet.required_documents.is_empty());
+        ) else {
+            panic!("expected needs_input");
+        };
+        assert_eq!(
+            questions,
+            vec!["Укажите адрес документа «docs/guides/research-lineage.md»"]
+        );
     }
 
-    /// Dropping is surgical: addressable documents survive alongside the
-    /// blank ones that are removed.
+    /// Fully addressed documents pass as before; blank/blank noise is dropped.
     #[test]
-    fn addressable_documents_survive_the_drop() {
+    fn addressable_documents_pass_and_noise_is_dropped() {
         let packet = parse_action_packet(
             &arguments(json!([
                 {"title": "manifest", "uri": "docs/manifest.md"},
-                {"title": "unaddressable", "uri": "   "},
+                {"title": " ", "uri": ""},
             ])),
             &context(),
             "dec-1",
             true,
         )
+        .ok()
         .expect("packet matures");
         assert_eq!(packet.required_documents.len(), 1);
         assert_eq!(packet.required_documents[0].uri, "docs/manifest.md");
+    }
+
+    /// The model is no longer asked for host-filled provenance: omitting the
+    /// `linked_*` keys must not fail deserialization.
+    #[test]
+    fn model_may_omit_host_filled_provenance() {
+        let mut args: Value = serde_json::from_str(&arguments(json!([]))).unwrap();
+        for key in [
+            "required_documents",
+            "linked_decisions",
+            "linked_knowledge",
+            "linked_rejected",
+        ] {
+            args.as_object_mut().unwrap().remove(key);
+        }
+        let packet = parse_action_packet(&args.to_string(), &context(), "dec-1", false)
+            .ok()
+            .expect("packet matures");
+        assert_eq!(packet.linked_decisions[0].id, "dec-1");
     }
 
     /// An address the brief already carries must survive a malformed model
@@ -358,6 +400,7 @@ mod tests {
             "sensing_item": {},
         });
         let packet = parse_action_packet(&args.to_string(), &context, "dec-1", true)
+            .ok()
             .expect("packet matures");
         assert_eq!(packet.linked_knowledge[0].id, "kn-1");
         assert_eq!(packet.linked_rejected[0].id, "rej-1");
@@ -369,8 +412,12 @@ mod tests {
     fn required_fields_still_fail_the_gate() {
         let mut args: Value = serde_json::from_str(&arguments(json!([]))).unwrap();
         args["do_items"] = json!([]);
-        let error = parse_action_packet(&args.to_string(), &context(), "dec-1", true)
-            .expect_err("an empty required list is still missing");
+        let error = invalid(parse_action_packet(
+            &args.to_string(),
+            &context(),
+            "dec-1",
+            true,
+        ));
         assert!(error.contains("do_items"), "unexpected error: {error}");
     }
 }

@@ -68,12 +68,17 @@ fn tools() -> Vec<serde_json::Value> {
         "description": "Build a typed ActionPacket linked to an upstream Decision. \
             Requires an AI provider (an `ai` block in the params or OPENAI_API_KEY on the \
             server); without one the method answers 503 ai_not_configured. `plan_brief` \
-            is passed to the model as grounding context.",
+            is passed to the model as grounding context. Optional `strictness` (\"soft\" default, \
+            \"strict\") is the maturity gate applied to the result: not ready → 422 \
+            not_ready with `missing`. A document the model named without an address is not \
+            invented or dropped: the answer is 422 needs_input with `questions` for the human; \
+            nothing is persisted.",
         "inputSchema": {
             "type": "object",
             "properties": {
                 "source_ref": {"type": "string"},
-                "plan_brief": {"type": "object"}
+                "plan_brief": {"type": "object"},
+                "strictness": {"type": "string", "enum": ["soft", "strict"]}
             },
             "required": ["source_ref"]
         }
@@ -158,6 +163,10 @@ async fn main() {
 struct PackParams {
     /// Upstream Decision id, preserved as ActionPacket provenance.
     source_ref: String,
+    /// Maturity gate applied to the built packet; defaults to soft, as in
+    /// `fujin.assess`.
+    #[serde(default)]
+    strictness: FujinStrictness,
 }
 
 #[derive(serde::Deserialize)]
@@ -281,6 +290,10 @@ async fn dispatch<P: fujin::AiProvider>(
             let (packet, usage) = fujin::pack_ai(provider, &context, &p.source_ref)
                 .await
                 .map_err(|error| match error {
+                    fujin::ActionsError::NeedsInput(questions) => (
+                        StatusCode::UNPROCESSABLE_ENTITY,
+                        json!({"error": "needs_input", "questions": questions}),
+                    ),
                     fujin::ActionsError::Validation(detail) => (
                         StatusCode::BAD_GATEWAY,
                         json!({"error": "invalid_ai_output", "detail": detail}),
@@ -290,7 +303,7 @@ async fn dispatch<P: fujin::AiProvider>(
                         json!({"error": "ai_error", "detail": error.to_string()}),
                     ),
                 })?;
-            if let Maturity::NotReady { missing } = fujin::assess(&packet) {
+            if let Maturity::NotReady { missing } = fujin::assess_with(&packet, p.strictness) {
                 return Err((
                     StatusCode::UNPROCESSABLE_ENTITY,
                     json!({"error": "not_ready", "missing": missing}),
@@ -575,10 +588,10 @@ mod tests {
     async fn pack_repairs_one_missing_field_without_rerunning_other_layers() {
         let mut invalid = packet_args("ignored");
         invalid.as_object_mut().unwrap().remove("goal");
-        let invalid = invalid.to_string();
-        let expected_error = serde_json::from_str::<ActionPacket>(&invalid)
+        let expected_error = serde_json::from_value::<ActionPacket>(invalid.clone())
             .unwrap_err()
             .to_string();
+        let invalid = invalid.to_string();
         let fake = SequenceFake::new(vec![
             packet_call(invalid.clone()),
             packet_call(packet_args("Repaired goal").to_string()),
@@ -624,10 +637,10 @@ mod tests {
     async fn pack_repairs_required_document_without_title() {
         let mut invalid = packet_args("Ship auth");
         invalid["required_documents"] = json!([{"uri": "plan://1"}]);
-        let invalid = invalid.to_string();
-        let expected_error = serde_json::from_str::<ActionPacket>(&invalid)
+        let expected_error = serde_json::from_value::<ActionPacket>(invalid.clone())
             .unwrap_err()
             .to_string();
+        let invalid = invalid.to_string();
         let fake = SequenceFake::new(vec![
             packet_call(invalid),
             packet_call(packet_args("Ship auth").to_string()),
@@ -749,6 +762,51 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(out["action_packet"]["linked_rejected"][0]["id"], "alt_1");
+    }
+
+    fn fake_with(args: serde_json::Value) -> Fake {
+        Fake(Ok(vec![AiOutput::ToolCall(ToolCall {
+            name: "build_action_packet".into(),
+            arguments: args.to_string(),
+        })]))
+    }
+
+    #[tokio::test]
+    async fn pack_document_without_address_is_needs_input_and_not_persisted() {
+        let mut args = packet_args("Ship auth");
+        args["required_documents"] = json!([{"title": "guide.md", "uri": ""}]);
+        let fake = fake_with(args);
+        let (code, body) = dispatch(Some(&fake), false, "fujin.pack", json!({"source_ref": "dec_q"}))
+            .await
+            .unwrap_err();
+        assert_eq!(code, StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(body["error"], "needs_input");
+        assert_eq!(body["questions"][0], "Укажите адрес документа «guide.md»");
+        let listed = dispatch(None::<&OpenAiProvider>, false, "fujin.list", json!({}))
+            .await
+            .unwrap();
+        assert_eq!(listed["action_packets"], json!([]));
+    }
+
+    #[tokio::test]
+    async fn pack_strict_without_provenance_is_not_ready_soft_is_ready() {
+        let mut args = packet_args("Ship auth");
+        args["linked_knowledge"] = json!([]);
+        let fake = fake_with(args);
+        let (code, body) = dispatch(
+            Some(&fake),
+            false,
+            "fujin.pack",
+            json!({"source_ref": "dec_s", "strictness": "strict"}),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(code, StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(body["error"], "not_ready");
+        assert_eq!(body["missing"], json!(["linked_knowledge"]));
+        dispatch(Some(&fake), false, "fujin.pack", json!({"source_ref": "dec_s"}))
+            .await
+            .expect("soft keeps empty provenance ready");
     }
 
     #[tokio::test]
