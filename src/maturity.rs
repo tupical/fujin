@@ -6,10 +6,14 @@
 //! same packet always yields the same verdict, and a `NotReady` verdict
 //! names exactly which fields are missing so the upper layers know what
 //! to finish.
+//!
+//! Only blocking fields gate readiness. `constraints`, `risks`,
+//! `linked_decisions` and (under Soft) the provenance trio are advisory:
+//! see [`advisory_warnings`].
 
 use serde::{Deserialize, Serialize};
 
-use crate::packet::ActionPacket;
+use crate::packet::{ActionPacket, Gate, LinkedItem, RequiredDocument};
 
 /// The deterministic verdict for an [`ActionPacket`].
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -66,29 +70,6 @@ pub fn assess(packet: &ActionPacket) -> Maturity {
 pub fn assess_with(packet: &ActionPacket, strictness: FujinStrictness) -> Maturity {
     let mut missing = Vec::new();
 
-    fn str_present(s: &str) -> bool {
-        !s.trim().is_empty()
-    }
-    fn list_present(items: &[String]) -> bool {
-        !items.is_empty() && items.iter().all(|s| str_present(s))
-    }
-    fn structs_present<T>(items: &[T], all_ok: impl Fn(&T) -> bool) -> bool {
-        !items.is_empty() && items.iter().all(all_ok)
-    }
-    fn structs_valid_or_empty<T>(items: &[T], all_ok: impl Fn(&T) -> bool) -> bool {
-        items.is_empty() || items.iter().all(all_ok)
-    }
-    fn provenance_ok<T>(
-        items: &[T],
-        all_ok: impl Fn(&T) -> bool,
-        strictness: FujinStrictness,
-    ) -> bool {
-        match strictness {
-            FujinStrictness::Soft => structs_valid_or_empty(items, all_ok),
-            FujinStrictness::Strict => structs_present(items, all_ok),
-        }
-    }
-
     if !str_present(&packet.goal) {
         missing.push("goal");
     }
@@ -107,48 +88,43 @@ pub fn assess_with(packet: &ActionPacket, strictness: FujinStrictness) -> Maturi
     if !list_present(&packet.completion_criteria) {
         missing.push("completion_criteria");
     }
-    if !list_present(&packet.constraints) {
-        missing.push("constraints");
-    }
-    if !list_present(&packet.risks) {
-        missing.push("risks");
-    }
     if !list_present(&packet.dependencies) {
         missing.push("dependencies");
     }
-    if !provenance_ok(
-        &packet.required_documents,
-        |d| str_present(&d.title) && str_present(&d.uri),
-        strictness,
+    if !list_present(&packet.target_files.owned) {
+        missing.push("target_files.owned");
+    }
+    // Provenance trio: a half-filled entry is always blocking; an empty list
+    // is blocking only under Strict (under Soft it is an advisory warning).
+    let doc_ok = |d: &RequiredDocument| str_present(&d.title) && str_present(&d.uri);
+    let item_ok = |i: &LinkedItem| str_present(&i.id) && str_present(&i.label);
+    let strict = strictness == FujinStrictness::Strict;
+    let trio_ok = |len: usize, all_ok: bool| all_ok && (len > 0 || !strict);
+    if !trio_ok(
+        packet.required_documents.len(),
+        packet.required_documents.iter().all(doc_ok),
     ) {
         missing.push("required_documents");
     }
-    if !structs_present(&packet.linked_decisions, |i| {
-        str_present(&i.id) && str_present(&i.label)
-    }) {
-        missing.push("linked_decisions");
-    }
-    if !provenance_ok(
-        &packet.linked_knowledge,
-        |i| str_present(&i.id) && str_present(&i.label),
-        strictness,
+    if !trio_ok(
+        packet.linked_knowledge.len(),
+        packet.linked_knowledge.iter().all(item_ok),
     ) {
         missing.push("linked_knowledge");
     }
-    if !provenance_ok(
-        &packet.linked_rejected,
-        |i| str_present(&i.id) && str_present(&i.label),
-        strictness,
+    if !trio_ok(
+        packet.linked_rejected.len(),
+        packet.linked_rejected.iter().all(item_ok),
     ) {
         missing.push("linked_rejected");
     }
     if !list_present(&packet.expected_artifacts) {
         missing.push("expected_artifacts");
     }
-    if !structs_present(&packet.before_start, |g| str_present(&g.rule)) {
+    if !gates_present(&packet.before_start) {
         missing.push("before_start");
     }
-    if !structs_present(&packet.before_complete, |g| str_present(&g.rule)) {
+    if !gates_present(&packet.before_complete) {
         missing.push("before_complete");
     }
 
@@ -161,10 +137,49 @@ pub fn assess_with(packet: &ActionPacket, strictness: FujinStrictness) -> Maturi
     }
 }
 
+fn str_present(s: &str) -> bool {
+    !s.trim().is_empty()
+}
+fn list_present(items: &[String]) -> bool {
+    !items.is_empty() && items.iter().all(|s| str_present(s))
+}
+fn gates_present(items: &[Gate]) -> bool {
+    !items.is_empty() && items.iter().all(|g| str_present(&g.rule))
+}
+
+/// Advisory fields that are empty (or carry a blank entry). They never make a
+/// packet `NotReady`; callers surface them as warnings next to a `Ready`
+/// verdict. Fields that are blocking under `strictness` are not repeated here.
+pub fn advisory_warnings(packet: &ActionPacket, strictness: FujinStrictness) -> Vec<String> {
+    let item_ok = |i: &LinkedItem| str_present(&i.id) && str_present(&i.label);
+    let mut w = Vec::new();
+    if !list_present(&packet.constraints) {
+        w.push("constraints");
+    }
+    if !list_present(&packet.risks) {
+        w.push("risks");
+    }
+    if packet.linked_decisions.is_empty() || !packet.linked_decisions.iter().all(item_ok) {
+        w.push("linked_decisions");
+    }
+    if strictness == FujinStrictness::Soft {
+        if packet.required_documents.is_empty() {
+            w.push("required_documents");
+        }
+        if packet.linked_knowledge.is_empty() {
+            w.push("linked_knowledge");
+        }
+        if packet.linked_rejected.is_empty() {
+            w.push("linked_rejected");
+        }
+    }
+    w.into_iter().map(String::from).collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::packet::{Gate, LinkedItem, RequiredDocument};
+    use crate::packet::{Gate, LinkedItem, RequiredDocument, TargetFiles};
 
     /// A packet with every §13 field filled.
     fn full_packet() -> ActionPacket {
@@ -196,6 +211,10 @@ mod tests {
             before_complete: vec![Gate {
                 rule: "tests pass".into(),
             }],
+            target_files: TargetFiles {
+                owned: vec!["src/maturity.rs".into()],
+                ..TargetFiles::default()
+            },
             ..ActionPacket::default()
         }
     }
@@ -206,7 +225,7 @@ mod tests {
     }
 
     #[test]
-    fn empty_packet_lists_every_missing_field() {
+    fn empty_packet_lists_every_blocking_field() {
         match assess(&ActionPacket::default()) {
             Maturity::NotReady { missing } => {
                 assert_eq!(
@@ -218,10 +237,8 @@ mod tests {
                         "why",
                         "do_not",
                         "completion_criteria",
-                        "constraints",
-                        "risks",
                         "dependencies",
-                        "linked_decisions",
+                        "target_files.owned",
                         "expected_artifacts",
                         "before_start",
                         "before_complete",
@@ -322,16 +339,43 @@ mod tests {
     }
 
     #[test]
-    fn missing_decision_lineage_is_not_ready() {
+    fn advisory_fields_warn_but_stay_ready() {
         let mut p = full_packet();
-        p.required_documents.clear();
-        p.linked_rejected.clear();
+        p.constraints.clear();
+        p.risks.clear();
         p.linked_decisions.clear();
+        p.required_documents.clear();
+        p.linked_knowledge.clear();
+        p.linked_rejected.clear();
 
+        assert_eq!(assess(&p), Maturity::Ready);
+        assert_eq!(
+            advisory_warnings(&p, FujinStrictness::Soft),
+            vec![
+                "constraints",
+                "risks",
+                "linked_decisions",
+                "required_documents",
+                "linked_knowledge",
+                "linked_rejected"
+            ]
+        );
+        // Strict makes the provenance trio blocking, so it is not a warning.
+        assert_eq!(
+            advisory_warnings(&p, FujinStrictness::Strict),
+            vec!["constraints", "risks", "linked_decisions"]
+        );
+        assert!(advisory_warnings(&full_packet(), FujinStrictness::Soft).is_empty());
+    }
+
+    #[test]
+    fn empty_target_files_owned_is_blocking() {
+        let mut p = full_packet();
+        p.target_files.owned.clear();
         assert_eq!(
             assess(&p),
             Maturity::NotReady {
-                missing: vec!["linked_decisions".to_string()]
+                missing: vec!["target_files.owned".to_string()]
             }
         );
     }
@@ -357,10 +401,7 @@ mod tests {
             "why" => p.why = String::new(),
             "do_not" => p.do_not.clear(),
             "completion_criteria" => p.completion_criteria.clear(),
-            "constraints" => p.constraints.clear(),
-            "risks" => p.risks.clear(),
             "dependencies" => p.dependencies.clear(),
-            "linked_decisions" => p.linked_decisions.clear(),
             "expected_artifacts" => p.expected_artifacts.clear(),
             "before_start" => p.before_start.clear(),
             "before_complete" => p.before_complete.clear(),
@@ -378,10 +419,7 @@ mod tests {
             "why",
             "do_not",
             "completion_criteria",
-            "constraints",
-            "risks",
             "dependencies",
-            "linked_decisions",
             "expected_artifacts",
             "before_start",
             "before_complete",
@@ -467,7 +505,10 @@ mod tests {
 
     #[test]
     fn soft_keeps_provenance_optional() {
-        assert_eq!(assess_with(&packet_without_provenance(), FujinStrictness::Soft), Maturity::Ready);
+        assert_eq!(
+            assess_with(&packet_without_provenance(), FujinStrictness::Soft),
+            Maturity::Ready
+        );
     }
 
     #[test]
@@ -477,6 +518,9 @@ mod tests {
 
     #[test]
     fn strict_full_packet_is_ready() {
-        assert_eq!(assess_with(&full_packet(), FujinStrictness::Strict), Maturity::Ready);
+        assert_eq!(
+            assess_with(&full_packet(), FujinStrictness::Strict),
+            Maturity::Ready
+        );
     }
 }
