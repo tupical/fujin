@@ -305,6 +305,7 @@ mod tests {
             "expected_artifacts": ["packet"],
             "before_start": [{"rule": "read the brief"}],
             "before_complete": [{"rule": "tests pass"}],
+            "target_files": {"owned": ["src/x.rs"], "read_only": [], "forbidden": []},
         })
         .to_string()
     }

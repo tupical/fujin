@@ -22,7 +22,7 @@ pub mod packet;
 
 pub use ai::{AiError, AiOutput, AiProvider, AiRequest, AiUsage, ToolCall};
 pub use error::ActionsError;
-pub use maturity::{assess, assess_with, FujinStrictness, Maturity};
+pub use maturity::{advisory_warnings, assess, assess_with, FujinStrictness, Maturity};
 pub use pack::pack_ai;
 pub use packet::{
     ActionPacket, ExecutionStep, Gate, HandoffPacket, HandoffProject, LinkedItem, RequiredDocument,

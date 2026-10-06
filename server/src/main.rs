@@ -63,55 +63,58 @@ impl McpHandler for Handler {
 /// Tool descriptors for `tools/list` — one per method actually handled by
 /// [`dispatch`].
 fn tools() -> Vec<serde_json::Value> {
-    let mut tools = vec![json!({
-        "name": "fujin_pack",
-        "description": "Build a typed ActionPacket linked to an upstream Decision. \
-            Requires an AI provider (an `ai` block in the params or OPENAI_API_KEY on the \
-            server); without one the method answers 503 ai_not_configured. `plan_brief` \
-            is passed to the model as grounding context. Optional `strictness` (\"soft\" default, \
-            \"strict\") is the maturity gate applied to the result: not ready → 422 \
-            not_ready with `missing`. A document the model named without an address is not \
-            invented or dropped: the answer is 422 needs_input with `questions` for the human; \
-            nothing is persisted.",
-        "inputSchema": {
-            "type": "object",
-            "properties": {
-                "source_ref": {"type": "string"},
-                "plan_brief": {"type": "object"},
-                "strictness": {"type": "string", "enum": ["soft", "strict"]}
-            },
-            "required": ["source_ref"]
-        }
-    }), json!({
-        "name": "fujin_assess",
-        "description": "Run the §13 maturity gate on an ActionPacket. \
-            Input: `action_packet` (packet JSON in the body; partial packets are accepted — \
-            absent §13 keys are assessed as missing) or `id` — the source id the packet is \
-            persisted under (e.g. `dec_1`), NOT `action_packet.id` (`ap_dec_1`); \
-            if both are given, `action_packet` wins and `id` is ignored; with neither, \
-            invalid_params is returned. \
-            Optional `strictness`: \"soft\" (default) allows the three provenance fields \
-            (`required_documents`, `linked_knowledge`, `linked_rejected`) to be empty as long \
-            as present values are valid; \"strict\" additionally requires them to be non-empty. \
-            Any other value is invalid_params. \
-            `strictness` is a top-level call parameter, NOT a key inside `action_packet` — \
-            a `strictness` key inside the packet body is ignored. \
-            Output: {\"method\": \"fujin.assess\", \"ready\": bool, \"missing\": [field names]}. \
-            A not-ready verdict is HTTP 200 with ready=false — assess is a query, not a gate \
-            (unlike fujin_pack, which answers 422 not_ready); treat any non-2xx here as a \
-            malformed request or server failure, never as \"not mature\". \
-            On ready=false, `missing` names the §13 fields to fill; fill them and re-assess — \
-            only a ready packet may go to handoff.",
-        "inputSchema": {
-            "type": "object",
-            "properties": {
-                "action_packet": {"type": "object"},
-                "id": {"type": "string"},
-                "strictness": {"type": "string", "enum": ["soft", "strict"]}
-            },
-            "anyOf": [{"required": ["action_packet"]}, {"required": ["id"]}]
-        }
-    })];
+    let mut tools = vec![
+        json!({
+            "name": "fujin_pack",
+            "description": "Build a typed ActionPacket linked to an upstream Decision. \
+                Requires an AI provider (an `ai` block in the params or OPENAI_API_KEY on the \
+                server); without one the method answers 503 ai_not_configured. `plan_brief` \
+                is passed to the model as grounding context. Optional `strictness` (\"soft\" default, \
+                \"strict\") is the maturity gate applied to the result: not ready → 422 \
+                not_ready with `missing`. A document the model named without an address is not \
+                invented or dropped: the answer is 422 needs_input with `questions` for the human; \
+                nothing is persisted.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "source_ref": {"type": "string"},
+                    "plan_brief": {"type": "object"},
+                    "strictness": {"type": "string", "enum": ["soft", "strict"]}
+                },
+                "required": ["source_ref"]
+            }
+        }),
+        json!({
+            "name": "fujin_assess",
+            "description": "Run the §13 maturity gate on an ActionPacket. \
+                Input: `action_packet` (packet JSON in the body; partial packets are accepted — \
+                absent §13 keys are assessed as missing) or `id` — the source id the packet is \
+                persisted under (e.g. `dec_1`), NOT `action_packet.id` (`ap_dec_1`); \
+                if both are given, `action_packet` wins and `id` is ignored; with neither, \
+                invalid_params is returned. \
+                Optional `strictness`: \"soft\" (default) allows the three provenance fields \
+                (`required_documents`, `linked_knowledge`, `linked_rejected`) to be empty as long \
+                as present values are valid; \"strict\" additionally requires them to be non-empty. \
+                Any other value is invalid_params. \
+                `strictness` is a top-level call parameter, NOT a key inside `action_packet` — \
+                a `strictness` key inside the packet body is ignored. \
+                Output: {\"method\": \"fujin.assess\", \"ready\": bool, \"missing\": [field names]}. \
+                A not-ready verdict is HTTP 200 with ready=false — assess is a query, not a gate \
+                (unlike fujin_pack, which answers 422 not_ready); treat any non-2xx here as a \
+                malformed request or server failure, never as \"not mature\". \
+                On ready=false, `missing` names the §13 fields to fill; fill them and re-assess — \
+                only a ready packet may go to handoff.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "action_packet": {"type": "object"},
+                    "id": {"type": "string"},
+                    "strictness": {"type": "string", "enum": ["soft", "strict"]}
+                },
+                "anyOf": [{"required": ["action_packet"]}, {"required": ["id"]}]
+            }
+        }),
+    ];
     for (name, description) in [
         ("fujin_list", "List persisted ActionPackets."),
         ("fujin_list_packets", "List persisted ActionPackets."),
@@ -219,8 +222,7 @@ fn parse_assess_packet(
     for (key, value) in body {
         base.insert(key.clone(), value.clone());
     }
-    serde_json::from_value(serde_json::Value::Object(base))
-        .map_err(|e| invalid(e.to_string()))
+    serde_json::from_value(serde_json::Value::Object(base)).map_err(|e| invalid(e.to_string()))
 }
 
 fn default_limit() -> i64 {
@@ -385,7 +387,8 @@ async fn dispatch<P: fujin::AiProvider>(
                 Maturity::Ready => (true, Vec::new()),
                 Maturity::NotReady { missing } => (false, missing),
             };
-            Ok(json!({"method": method, "ready": ready, "missing": missing}))
+            let warnings = fujin::advisory_warnings(&packet, p.strictness);
+            Ok(json!({"method": method, "ready": ready, "missing": missing, "warnings": warnings}))
         }
         other => Err((
             StatusCode::BAD_REQUEST,
@@ -446,11 +449,14 @@ mod tests {
             &self,
             _req: AiRequest,
         ) -> Result<(Vec<AiOutput>, Option<AiUsage>), AiError> {
-            Ok((self.0.clone()?, Some(AiUsage {
-                input_tokens: Some(123),
-                output_tokens: Some(45),
-                total_tokens: Some(168),
-            })))
+            Ok((
+                self.0.clone()?,
+                Some(AiUsage {
+                    input_tokens: Some(123),
+                    output_tokens: Some(45),
+                    total_tokens: Some(168),
+                }),
+            ))
         }
     }
 
@@ -512,7 +518,8 @@ mod tests {
             "linked_rejected": [{"id": "rejected_1", "label": "Alternative"}],
             "expected_artifacts": ["Patch"],
             "before_start": [{"rule": "Read plan"}],
-            "before_complete": [{"rule": "Run tests"}]
+            "before_complete": [{"rule": "Run tests"}],
+            "target_files": {"owned": ["src/auth.rs"], "read_only": [], "forbidden": []}
         })
     }
 
@@ -553,7 +560,7 @@ mod tests {
         );
 
         let fake = Fake(packet_call(generated.to_string()));
-        let explicit = json!({"target_files": {"owned": [], "read_only": [], "forbidden": ["src/"]}, "required_checks": ["audit"], "conflict_policy": "Stop", "reviewer_profile": null});
+        let explicit = json!({"target_files": {"owned": ["docs/"], "read_only": [], "forbidden": ["src/"]}, "required_checks": ["audit"], "conflict_policy": "Stop", "reviewer_profile": null});
         let out = dispatch(
             Some(&fake),
             false,
@@ -776,9 +783,14 @@ mod tests {
         let mut args = packet_args("Ship auth");
         args["required_documents"] = json!([{"title": "guide.md", "uri": ""}]);
         let fake = fake_with(args);
-        let (code, body) = dispatch(Some(&fake), false, "fujin.pack", json!({"source_ref": "dec_q"}))
-            .await
-            .unwrap_err();
+        let (code, body) = dispatch(
+            Some(&fake),
+            false,
+            "fujin.pack",
+            json!({"source_ref": "dec_q"}),
+        )
+        .await
+        .unwrap_err();
         assert_eq!(code, StatusCode::UNPROCESSABLE_ENTITY);
         assert_eq!(body["error"], "needs_input");
         assert_eq!(body["questions"][0], "Укажите адрес документа «guide.md»");
@@ -804,9 +816,14 @@ mod tests {
         assert_eq!(code, StatusCode::UNPROCESSABLE_ENTITY);
         assert_eq!(body["error"], "not_ready");
         assert_eq!(body["missing"], json!(["linked_knowledge"]));
-        dispatch(Some(&fake), false, "fujin.pack", json!({"source_ref": "dec_s"}))
-            .await
-            .expect("soft keeps empty provenance ready");
+        dispatch(
+            Some(&fake),
+            false,
+            "fujin.pack",
+            json!({"source_ref": "dec_s"}),
+        )
+        .await
+        .expect("soft keeps empty provenance ready");
     }
 
     #[tokio::test]
@@ -860,8 +877,7 @@ mod tests {
         assert_eq!(code, StatusCode::SERVICE_UNAVAILABLE);
         assert_eq!(body["error"], "ai_not_configured");
 
-        let stored: Option<ActionPacket> =
-            store.get("action_packet", "decision_1").await.unwrap();
+        let stored: Option<ActionPacket> = store.get("action_packet", "decision_1").await.unwrap();
         assert!(stored.is_none());
 
         // A packet persisted before shutdown must survive a restart.
@@ -1005,8 +1021,14 @@ mod tests {
         .unwrap_err();
         assert_eq!(code, StatusCode::BAD_GATEWAY);
         assert_eq!(body["error"], "invalid_ai_output");
-        assert!(body["detail"].as_str().unwrap().contains("initial: missing or blank fields: goal"));
-        assert!(body["detail"].as_str().unwrap().contains("repair: missing or blank fields: goal"));
+        assert!(body["detail"]
+            .as_str()
+            .unwrap()
+            .contains("initial: missing or blank fields: goal"));
+        assert!(body["detail"]
+            .as_str()
+            .unwrap()
+            .contains("repair: missing or blank fields: goal"));
         // Exhausting the repair still means NOTHING was persisted.
         let stored: Option<serde_json::Value> =
             store.get("action_packet", "dec_abc").await.unwrap();
@@ -1040,6 +1062,24 @@ mod tests {
         assert_eq!(out["method"], "fujin.assess");
         assert_eq!(out["ready"], true);
         assert_eq!(out["missing"], json!([]));
+    }
+
+    #[tokio::test]
+    async fn assess_advisory_gaps_are_warnings_not_missing() {
+        let mut args = packet_args("Ship auth");
+        args["risks"] = json!([]);
+        args["linked_knowledge"] = json!([]);
+        let out = dispatch(
+            None::<&OpenAiProvider>,
+            false,
+            "fujin.assess",
+            json!({"action_packet": args}),
+        )
+        .await
+        .unwrap();
+        assert_eq!(out["ready"], true);
+        assert_eq!(out["missing"], json!([]));
+        assert_eq!(out["warnings"], json!(["risks", "linked_knowledge"]));
     }
 
     #[tokio::test]
@@ -1140,10 +1180,8 @@ mod tests {
                 "why",
                 "do_not",
                 "completion_criteria",
-                "constraints",
-                "risks",
                 "dependencies",
-                "linked_decisions",
+                "target_files.owned",
                 "expected_artifacts",
                 "before_start",
                 "before_complete",
