@@ -686,6 +686,46 @@ mod tests {
         assert!(repair.contains("<untrusted_data>\n{"));
     }
 
+    /// L-11: the repair decision reads the error's kind field. A schema
+    /// error wrapped with context is still repaired once…
+    #[tokio::test]
+    async fn pack_repairs_wrapped_schema_error() {
+        let fake = SequenceFake::new(vec![
+            Err(AiError::schema("tool call missing function.name").context("provider")),
+            packet_call(packet_args("Ship auth").to_string()),
+        ]);
+
+        fujin::pack_ai(&fake, &json!({}), "dec_repair")
+            .await
+            .unwrap();
+
+        let requests = fake.requests.lock().unwrap();
+        assert_eq!(requests.len(), 2);
+        assert!(requests[1]
+            .input
+            .as_str()
+            .unwrap()
+            .contains("schema: provider: tool call missing function.name"));
+    }
+
+    /// …while a transport fault whose text merely looks like a schema error
+    /// is not: no repair call is spent on a network failure.
+    #[tokio::test]
+    async fn pack_does_not_repair_transport_error() {
+        let fake = SequenceFake::new(vec![Err(AiError::new(
+            "schema: ai response decode failed: error decoding response body",
+        ))]);
+
+        let error = fujin::pack_ai(&fake, &json!({}), "dec_transport")
+            .await
+            .unwrap_err()
+            .to_string();
+
+        assert!(error.contains("ai response decode failed"), "{error}");
+        assert!(!error.contains("repair"), "{error}");
+        assert_eq!(fake.requests.lock().unwrap().len(), 1);
+    }
+
     #[tokio::test]
     async fn pack_retries_transport_classified_schema_error() {
         let transport_error =
