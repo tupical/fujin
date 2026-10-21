@@ -128,6 +128,12 @@ pub struct ActionPacket {
     /// this packet's output, if any.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reviewer_profile: Option<String>,
+    /// условие пересмотра — when the decision behind this packet should be
+    /// revisited (ADR-0012). Carried from the brief / decision so the
+    /// executor and the Daruma task see it; checked only under
+    /// [`FujinStrictness::Strict`](crate::FujinStrictness::Strict).
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub revisit_when: String,
 }
 
 /// A single executable unit carved out of an Action Packet (§6.5). One

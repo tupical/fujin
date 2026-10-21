@@ -519,7 +519,8 @@ mod tests {
             "expected_artifacts": ["Patch"],
             "before_start": [{"rule": "Read plan"}],
             "before_complete": [{"rule": "Run tests"}],
-            "target_files": {"owned": ["src/auth.rs"], "read_only": [], "forbidden": []}
+            "target_files": {"owned": ["src/auth.rs"], "read_only": [], "forbidden": []},
+            "revisit_when": "if auth provider changes"
         })
     }
 
@@ -864,6 +865,53 @@ mod tests {
         )
         .await
         .expect("soft keeps empty provenance ready");
+    }
+
+    /// ADR-0012: the brief's revisit_when is host-filled into the packet
+    /// (over whatever the model wrote); without it `strict` names
+    /// `revisit_when`, `soft` stays ready.
+    #[tokio::test]
+    async fn pack_carries_brief_revisit_when_and_strict_requires_it() {
+        let mut args = packet_args("Ship auth");
+        args["revisit_when"] = json!("model paraphrase");
+        let fake = fake_with(args.clone());
+        let out = dispatch(
+            Some(&fake),
+            false,
+            "fujin.pack",
+            json!({
+                "source_ref": "dec_r", "strictness": "strict",
+                "plan_brief": {"revisit_when": "if write volume exceeds 50k/s"}
+            }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            out["action_packet"]["revisit_when"],
+            "if write volume exceeds 50k/s"
+        );
+
+        args.as_object_mut().unwrap().remove("revisit_when");
+        let fake = fake_with(args.clone());
+        let (code, body) = dispatch(
+            Some(&fake),
+            false,
+            "fujin.pack",
+            json!({"source_ref": "dec_r", "strictness": "strict"}),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(code, StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(body["missing"], json!(["revisit_when"]));
+        let soft = dispatch(
+            None::<&OpenAiProvider>,
+            false,
+            "fujin.assess",
+            json!({"action_packet": args}),
+        )
+        .await
+        .unwrap();
+        assert_eq!(soft["ready"], true);
     }
 
     #[tokio::test]

@@ -72,6 +72,7 @@ pub fn packet_from_brief(brief: &serde_json::Value) -> ActionPacket {
         conflict_policy: brief["conflict_policy"].as_str().map(str::to_owned),
         required_checks: strings(brief, "required_checks"),
         reviewer_profile: brief["reviewer_profile"].as_str().map(str::to_owned),
+        revisit_when: text(brief, "revisit_when").trim().to_owned(),
         ..ActionPacket::default()
     }
 }
@@ -96,5 +97,22 @@ mod adapter_tests {
         assert_eq!(packet.why, "avoid data loss");
         assert_eq!(packet.linked_decisions[0].id, "dec_1");
         assert!(packet.required_documents.is_empty());
+        assert!(packet.revisit_when.is_empty());
+    }
+
+    #[test]
+    fn brief_revisit_when_is_carried_into_packet() {
+        let packet = packet_from_brief(&json!({
+            "goal": "Ship storage",
+            "revisit_when": " if write volume exceeds 50k/s "
+        }));
+        assert_eq!(packet.revisit_when, "if write volume exceeds 50k/s");
+        let wire = serde_json::to_value(&packet).unwrap();
+        assert_eq!(wire["revisit_when"], "if write volume exceeds 50k/s");
+        let back: ActionPacket = serde_json::from_value(wire).unwrap();
+        assert_eq!(back, packet);
+        // Unset stays off the wire, so old consumers see no new key.
+        let wire = serde_json::to_value(packet_from_brief(&json!({"goal": "g"}))).unwrap();
+        assert!(wire.get("revisit_when").is_none());
     }
 }

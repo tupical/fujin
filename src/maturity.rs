@@ -63,10 +63,10 @@ pub fn assess(packet: &ActionPacket) -> Maturity {
 /// Like [`assess`], but with an explicit provenance gate strictness.
 ///
 /// The only difference is how the three provenance fields
-/// (`required_documents`, `linked_knowledge`, `linked_rejected`) are
-/// checked: [`FujinStrictness::Soft`] keeps the current valid-or-empty
-/// semantics, [`FujinStrictness::Strict`] demands they be non-empty too.
-/// Every other §13 check is unchanged.
+/// (`required_documents`, `linked_knowledge`, `linked_rejected`) and
+/// `revisit_when` (ADR-0012) are checked: [`FujinStrictness::Soft`] keeps
+/// the current valid-or-empty semantics, [`FujinStrictness::Strict`]
+/// demands they be non-empty too. Every other §13 check is unchanged.
 pub fn assess_with(packet: &ActionPacket, strictness: FujinStrictness) -> Maturity {
     let mut missing = Vec::new();
 
@@ -126,6 +126,11 @@ pub fn assess_with(packet: &ActionPacket, strictness: FujinStrictness) -> Maturi
     }
     if !gates_present(&packet.before_complete) {
         missing.push("before_complete");
+    }
+    // ADR-0012: the decision's revisit condition is valid-or-empty under
+    // Soft and required under Strict.
+    if strict && !str_present(&packet.revisit_when) {
+        missing.push("revisit_when");
     }
 
     if missing.is_empty() {
@@ -215,6 +220,7 @@ mod tests {
                 owned: vec!["src/maturity.rs".into()],
                 ..TargetFiles::default()
             },
+            revisit_when: "if §13 gains a field".into(),
             ..ActionPacket::default()
         }
     }
@@ -514,6 +520,20 @@ mod tests {
     #[test]
     fn assess_defaults_to_soft_strictness() {
         assert_eq!(assess(&packet_without_provenance()), Maturity::Ready);
+    }
+
+    #[test]
+    fn strict_requires_revisit_when_soft_does_not() {
+        let mut p = full_packet();
+        p.revisit_when = "  ".into();
+        assert_eq!(
+            assess_with(&p, FujinStrictness::Strict),
+            Maturity::NotReady {
+                missing: vec!["revisit_when".to_string()]
+            }
+        );
+        assert_eq!(assess_with(&p, FujinStrictness::Soft), Maturity::Ready);
+        assert!(!advisory_warnings(&p, FujinStrictness::Soft).contains(&"revisit_when".into()));
     }
 
     #[test]
