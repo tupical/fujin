@@ -69,7 +69,10 @@ fn tools() -> Vec<serde_json::Value> {
             "description": "Build a typed ActionPacket linked to an upstream Decision. \
                 Requires an AI provider (an `ai` block in the params or OPENAI_API_KEY on the \
                 server); without one the method answers 503 ai_not_configured. `plan_brief` \
-                is passed to the model as grounding context. Optional `strictness` (\"soft\" default, \
+                is passed to the model as grounding context; `plan_brief.reversibility` \
+                (\"reversible\" | \"irreversible\") is the only source of the packet's class — \
+                an irreversible packet needs a before_start gate `risk_check: rollback`. \
+                Optional `strictness` (\"soft\" default, \
                 \"strict\") is the maturity gate applied to the result: not ready → 422 \
                 not_ready with `missing`. A document the model named without an address is not \
                 invented or dropped: the answer is 422 needs_input with `questions` for the human; \
@@ -94,7 +97,10 @@ fn tools() -> Vec<serde_json::Value> {
                 invalid_params is returned. \
                 Optional `strictness`: \"soft\" (default) allows the three provenance fields \
                 (`required_documents`, `linked_knowledge`, `linked_rejected`) to be empty as long \
-                as present values are valid; \"strict\" additionally requires them to be non-empty. \
+                as present values are valid; \"strict\" additionally requires them to be non-empty \
+                and `reversibility` to be set. Under either level an `irreversible` packet is \
+                missing `before_start:risk_check:rollback` until a before_start gate reads \
+                `risk_check: rollback`. \
                 Any other value is invalid_params. \
                 `strictness` is a top-level call parameter, NOT a key inside `action_packet` — \
                 a `strictness` key inside the packet body is ignored. \
@@ -619,6 +625,83 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn pack_irreversible_brief_needs_rollback_gate_and_model_cannot_reclassify() {
+        // The model drops the rollback gate and claims "reversible"; the brief's
+        // class wins, so the first answer is immature and repair must add it.
+        let mut first = packet_args("Drop legacy table");
+        first["reversibility"] = json!("reversible");
+        let mut repaired = packet_args("Drop legacy table");
+        repaired["before_start"] = json!([{"rule": "Read plan"}, {"rule": "risk_check: rollback"}]);
+        let fake = SequenceFake::new(vec![
+            packet_call(first.to_string()),
+            packet_call(repaired.to_string()),
+        ]);
+        let context = json!({"plan_brief": {"reversibility": "irreversible"}});
+
+        let (packet, _) = fujin::pack_ai(&fake, &context, "dec_irr").await.unwrap();
+
+        assert_eq!(
+            packet.reversibility,
+            Some(fujin::Reversibility::Irreversible)
+        );
+        assert!(fujin::assess(&packet).is_ready());
+        let requests = fake.requests.lock().unwrap();
+        assert_eq!(requests.len(), 2);
+        assert!(requests[0]
+            .input
+            .as_str()
+            .unwrap()
+            .contains("risk_check: rollback"));
+        assert!(requests[1]
+            .input
+            .as_str()
+            .unwrap()
+            .contains("before_start:risk_check:rollback"));
+    }
+
+    #[tokio::test]
+    async fn pack_without_brief_class_ignores_model_class() {
+        let mut args = packet_args("Ship auth");
+        args["reversibility"] = json!("irreversible");
+        let fake = fake_with(args);
+        let out = dispatch(
+            Some(&fake),
+            false,
+            "fujin.pack",
+            json!({"source_ref": "dec_u"}),
+        )
+        .await
+        .unwrap();
+        assert!(out["action_packet"].get("reversibility").is_none());
+    }
+
+    #[tokio::test]
+    async fn assess_irreversible_packet_reports_missing_rollback_gate() {
+        let mut args = packet_args("Drop legacy table");
+        args["reversibility"] = json!("irreversible");
+        let out = dispatch(
+            None::<&OpenAiProvider>,
+            false,
+            "fujin.assess",
+            json!({"action_packet": args.clone()}),
+        )
+        .await
+        .unwrap();
+        assert_eq!(out["ready"], false);
+        assert_eq!(out["missing"], json!(["before_start:risk_check:rollback"]));
+        args["before_start"] = json!([{"rule": "risk_check: rollback"}]);
+        let out = dispatch(
+            None::<&OpenAiProvider>,
+            false,
+            "fujin.assess",
+            json!({"action_packet": args}),
+        )
+        .await
+        .unwrap();
+        assert_eq!(out["ready"], true);
+    }
+
+    #[tokio::test]
     async fn pack_fails_closed_after_one_invalid_repair() {
         let mut missing_goal = packet_args("ignored");
         missing_goal["goal"] = json!("");
@@ -849,7 +932,8 @@ mod tests {
             Some(&fake),
             false,
             "fujin.pack",
-            json!({"source_ref": "dec_s", "strictness": "strict"}),
+            json!({"source_ref": "dec_s", "strictness": "strict",
+                   "plan_brief": {"reversibility": "reversible"}}),
         )
         .await
         .unwrap_err();
@@ -1260,6 +1344,7 @@ mod tests {
         args["required_documents"] = json!([]);
         args["linked_knowledge"] = json!([]);
         args["linked_rejected"] = json!([]);
+        args["reversibility"] = json!("reversible");
 
         let soft = dispatch(
             None::<&OpenAiProvider>,
@@ -1293,11 +1378,13 @@ mod tests {
     async fn assess_strict_accepts_fully_filled_packet() {
         // packet_args already carries a non-empty provenance trio; under
         // "strict" that must stay ready with nothing missing.
+        let mut args = packet_args("Ship auth");
+        args["reversibility"] = json!("reversible");
         let out = dispatch(
             None::<&OpenAiProvider>,
             false,
             "fujin.assess",
-            json!({"action_packet": packet_args("Ship auth"), "strictness": "strict"}),
+            json!({"action_packet": args, "strictness": "strict"}),
         )
         .await
         .unwrap();

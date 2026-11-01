@@ -32,6 +32,12 @@ PlanBrief имеют приоритет над выводом модели, а �
 проверка зрелости не заявляет, что проверяет простоту реализации или результаты
 тестов.
 
+Одно поле envelope читает гейт: `reversibility` (`reversible` |
+`irreversible`, ADR-0017) приходит только из `PlanBrief.reversibility` —
+модель класс не меняет. Пакет `irreversible` не созрел, пока в `before_start`
+нет гейта `risk_check: rollback` (проза в `risks` не считается); `strict`
+требует ещё и заполненного класса.
+
 ## Структура репозитория
 
 - `src/` — библиотека `fujin`: типы `ActionPacket`/handoff, `pack_ai`,

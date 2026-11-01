@@ -31,6 +31,12 @@ Unspecified bounds remain empty; these declarations do not enforce filesystem
 access. The unused standalone minimality validator has been removed: maturity
 does not claim to verify implementation simplicity or test results.
 
+One envelope field is read by the gate: `reversibility` (`reversible` |
+`irreversible`, ADR-0017) comes only from `PlanBrief.reversibility` — the model
+cannot reclassify. An `irreversible` packet is not mature until `before_start`
+has a gate `risk_check: rollback` (prose in `risks` does not count); `strict`
+also requires the class to be set.
+
 ## Repository layout
 
 - `src/` — the `fujin` library: `ActionPacket`/handoff types, `pack_ai`,

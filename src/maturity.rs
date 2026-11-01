@@ -7,13 +7,17 @@
 //! names exactly which fields are missing so the upper layers know what
 //! to finish.
 //!
+//! One envelope field is semantic (ADR-0017): a packet whose `reversibility`
+//! is `Irreversible` is not mature without a `before_start` gate that parses
+//! as `risk_check: rollback`; under `Strict` the class itself is required.
+//!
 //! Only blocking fields gate readiness. `constraints`, `risks`,
 //! `linked_decisions` and (under Soft) the provenance trio are advisory:
 //! see [`advisory_warnings`].
 
 use serde::{Deserialize, Serialize};
 
-use crate::packet::{ActionPacket, Gate, LinkedItem, RequiredDocument};
+use crate::packet::{ActionPacket, Gate, LinkedItem, RequiredDocument, Reversibility};
 
 /// The deterministic verdict for an [`ActionPacket`].
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -124,6 +128,20 @@ pub fn assess_with(packet: &ActionPacket, strictness: FujinStrictness) -> Maturi
     if !gates_present(&packet.before_start) {
         missing.push("before_start");
     }
+    // ADR-0017: irreversibility is answered by a rollback gate, never by
+    // prose in `risks`. Under Soft an unclassified packet is status quo.
+    match packet.reversibility {
+        Some(Reversibility::Irreversible)
+            if !packet
+                .before_start
+                .iter()
+                .any(|g| is_rollback_gate(&g.rule)) =>
+        {
+            missing.push("before_start:risk_check:rollback");
+        }
+        None if strictness == FujinStrictness::Strict => missing.push("reversibility"),
+        _ => {}
+    }
     if !gates_present(&packet.before_complete) {
         missing.push("before_complete");
     }
@@ -145,6 +163,12 @@ fn list_present(items: &[String]) -> bool {
 }
 fn gates_present(items: &[Gate]) -> bool {
     !items.is_empty() && items.iter().all(|g| str_present(&g.rule))
+}
+/// A gate in the ADR-0010 form `<requirement_type>: <target>` naming the
+/// Daruma requirement `risk_check` with target `rollback`.
+fn is_rollback_gate(rule: &str) -> bool {
+    rule.split_once(':')
+        .is_some_and(|(kind, target)| kind.trim() == "risk_check" && target.trim() == "rollback")
 }
 
 /// Advisory fields that are empty (or carry a blank entry). They never make a
@@ -215,6 +239,7 @@ mod tests {
                 owned: vec!["src/maturity.rs".into()],
                 ..TargetFiles::default()
             },
+            reversibility: Some(Reversibility::Reversible),
             ..ActionPacket::default()
         }
     }
@@ -521,6 +546,67 @@ mod tests {
         assert_eq!(
             assess_with(&full_packet(), FujinStrictness::Strict),
             Maturity::Ready
+        );
+    }
+
+    // ── Reversibility (ADR-0017) ──────────────────────────────────────────────
+
+    fn irreversible_packet() -> ActionPacket {
+        let mut p = full_packet();
+        p.reversibility = Some(Reversibility::Irreversible);
+        p.risks = vec!["production rows are deleted".into()];
+        p
+    }
+
+    #[test]
+    fn irreversible_without_rollback_gate_is_not_ready() {
+        // Prose in `risks` and an arbitrary before_start gate do not count.
+        for strictness in [FujinStrictness::Soft, FujinStrictness::Strict] {
+            assert_eq!(
+                assess_with(&irreversible_packet(), strictness),
+                Maturity::NotReady {
+                    missing: vec!["before_start:risk_check:rollback".to_string()]
+                }
+            );
+        }
+    }
+
+    #[test]
+    fn irreversible_with_rollback_gate_is_ready() {
+        for rule in ["risk_check: rollback", " risk_check :rollback "] {
+            let mut p = irreversible_packet();
+            p.before_start.push(Gate { rule: rule.into() });
+            assert_eq!(assess(&p), Maturity::Ready, "{rule:?}");
+        }
+        for rule in [
+            "risk_check: data",
+            "rollback",
+            "risk_check",
+            "check_passed: rollback",
+        ] {
+            let mut p = irreversible_packet();
+            p.before_start.push(Gate { rule: rule.into() });
+            assert!(!assess(&p).is_ready(), "{rule:?}");
+        }
+        // A rollback gate in before_complete is too late.
+        let mut p = irreversible_packet();
+        p.before_complete.push(Gate {
+            rule: "risk_check: rollback".into(),
+        });
+        assert!(!assess(&p).is_ready());
+    }
+
+    #[test]
+    fn reversible_and_unclassified_follow_strictness() {
+        let mut p = full_packet();
+        assert_eq!(assess_with(&p, FujinStrictness::Strict), Maturity::Ready);
+        p.reversibility = None;
+        assert_eq!(assess_with(&p, FujinStrictness::Soft), Maturity::Ready);
+        assert_eq!(
+            assess_with(&p, FujinStrictness::Strict),
+            Maturity::NotReady {
+                missing: vec!["reversibility".to_string()]
+            }
         );
     }
 }
