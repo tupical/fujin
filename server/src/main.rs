@@ -68,7 +68,8 @@ fn tools() -> Vec<serde_json::Value> {
             "name": "fujin_pack",
             "description": "Build a typed ActionPacket linked to an upstream Decision. \
                 Requires an AI provider (an `ai` block in the params or OPENAI_API_KEY on the \
-                server); without one the method answers 503 ai_not_configured. `plan_brief` \
+                server); without one the call returns an isError result with error \
+                ai_not_configured. `plan_brief` \
                 is passed to the model as grounding context; `plan_brief.reversibility` \
                 (\"reversible\" | \"irreversible\") is the only source of the packet's class — \
                 an irreversible packet needs a before_start gate `risk_check: rollback`. \
