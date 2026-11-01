@@ -43,6 +43,16 @@ pub struct Gate {
     pub rule: String,
 }
 
+/// Whether the effect of this packet's work can be undone (ADR-0017). The
+/// Decisions layer classifies; the class rides here through the brief. Wire
+/// form `"reversible" | "irreversible"`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Reversibility {
+    Reversible,
+    Irreversible,
+}
+
 /// Scoped write authority handed to the executor: which paths it owns,
 /// which it may only read, and which are explicitly off-limits. Part of
 /// the bounded execution envelope, not the §13 required contract — an
@@ -128,6 +138,12 @@ pub struct ActionPacket {
     /// this packet's output, if any.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reviewer_profile: Option<String>,
+    /// обратимость — the class of the decision this packet implements.
+    /// Unlike the rest of the envelope the maturity gate reads it: an
+    /// `Irreversible` packet needs a `risk_check: rollback` gate in
+    /// `before_start` (ADR-0017). Absent = not classified.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reversibility: Option<Reversibility>,
 }
 
 /// A single executable unit carved out of an Action Packet (§6.5). One

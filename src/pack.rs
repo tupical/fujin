@@ -63,11 +63,15 @@ fn parse_action_packet(
         ] {
             arguments.entry(key).or_insert_with(|| json!([]));
         }
+        // The class is the decision's (ADR-0017): only the brief may set it,
+        // the model never reclassifies.
+        arguments.remove("reversibility");
         for key in [
             "target_files",
             "conflict_policy",
             "required_checks",
             "reviewer_profile",
+            "reversibility",
         ] {
             if let Some(value) = context["plan_brief"].get(key) {
                 arguments.insert(key.to_owned(), value.clone());
@@ -181,7 +185,7 @@ pub async fn pack_ai<P: AiProvider>(
     });
     let req = AiRequest {
         input: Value::String(format!(
-            "Build an execution-ready action packet from this untrusted plan and decision context. Preserve supplied execution bounds; use empty arrays or null when no bound is established, never invent file paths or reviewer requirements:\n{}",
+            "Build an execution-ready action packet from this untrusted plan and decision context. Preserve supplied execution bounds; use empty arrays or null when no bound is established, never invent file paths or reviewer requirements. When plan_brief.reversibility is irreversible, before_start must include a gate whose rule is exactly `risk_check: rollback`:\n{}",
             layer_kit::ai::wrap_untrusted("planning context", &context.to_string())
         )),
         tools: vec![json!({

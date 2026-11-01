@@ -26,7 +26,7 @@ pub use maturity::{advisory_warnings, assess, assess_with, FujinStrictness, Matu
 pub use pack::pack_ai;
 pub use packet::{
     ActionPacket, ExecutionStep, Gate, HandoffPacket, HandoffProject, LinkedItem, RequiredDocument,
-    TargetFiles, TaskCandidate, WorkOrder,
+    Reversibility, TargetFiles, TaskCandidate, WorkOrder,
 };
 
 /// Map the wire representation of a PlanBrief (§15) into an ActionPacket (§13).
@@ -72,6 +72,7 @@ pub fn packet_from_brief(brief: &serde_json::Value) -> ActionPacket {
         conflict_policy: brief["conflict_policy"].as_str().map(str::to_owned),
         required_checks: strings(brief, "required_checks"),
         reviewer_profile: brief["reviewer_profile"].as_str().map(str::to_owned),
+        reversibility: serde_json::from_value(brief["reversibility"].clone()).unwrap_or(None),
         ..ActionPacket::default()
     }
 }
@@ -96,5 +97,16 @@ mod adapter_tests {
         assert_eq!(packet.why, "avoid data loss");
         assert_eq!(packet.linked_decisions[0].id, "dec_1");
         assert!(packet.required_documents.is_empty());
+    }
+
+    #[test]
+    fn brief_reversibility_reaches_packet() {
+        let packet = packet_from_brief(&json!({"reversibility": "irreversible"}));
+        assert_eq!(packet.reversibility, Some(Reversibility::Irreversible));
+        assert_eq!(packet_from_brief(&json!({})).reversibility, None);
+        assert_eq!(
+            packet_from_brief(&json!({"reversibility": "maybe"})).reversibility,
+            None
+        );
     }
 }
